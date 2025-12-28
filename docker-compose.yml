@@ -1,0 +1,27 @@
+services:
+  mcp-time-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-7545}
+      HOST: ${HOST:-0.0.0.0}
+
+      # Required for production
+      REDIS_URL: ${REDIS_URL}
+      MCP_BEARER_TOKENS: ${MCP_BEARER_TOKENS}
+
+      # Limits
+      MCP_BODY_LIMIT: ${MCP_BODY_LIMIT:-512kb}
+      RATE_LIMIT_PER_IP_PER_MINUTE: ${RATE_LIMIT_PER_IP_PER_MINUTE:-120}
+      SSE_MAX_CONNS_PER_IP: ${SSE_MAX_CONNS_PER_IP:-5}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+
+      # Admin dashboard (optional)
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_COOKIE_SECRET: ${ADMIN_COOKIE_SECRET:-}
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-1}
+      ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-604800}
+    ports:
+      - "127.0.0.1:${PORT:-7545}:${PORT:-7545}"
+
