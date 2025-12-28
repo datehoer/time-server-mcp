@@ -17,14 +17,11 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-RUN addgroup -S nodejs && adduser -S node -G nodejs
-
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
+COPY --from=build --chown=node:node /app/package.json ./package.json
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
 
 USER node
 
 EXPOSE 3001
 CMD ["node", "dist/index.js"]
-
