@@ -119,7 +119,7 @@ function parseToUtc(input: TimeInput): DateTime {
  * ----------------------------- */
 
 const server = new McpServer({
-  name: "time-server",
+  name: "time_server",
   version: "1.0.0",
 });
 
