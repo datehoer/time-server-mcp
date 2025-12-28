@@ -4,10 +4,10 @@
 
 ## 功能
 
-- `time.now`：获取当前时间（默认 UTC），可指定 IANA 时区与输出格式
-- `time.convert`：把一个时间输入转换到多个输出时区
-- `time.shift`：对基准时间做偏移（支持负数，表示回到过去）
-- `time.range`：获取常见范围的起止（today/yesterday/this_week/last_week/last_7_days）
+- `time_now`：获取当前时间（默认 UTC），可指定 IANA 时区与输出格式
+- `time_convert`：把一个时间输入转换到多个输出时区
+- `time_shift`：对基准时间做偏移（支持负数，表示回到过去）
+- `time_range`：获取常见范围的起止（today/yesterday/this_week/last_week/last_7_days）
 
 ## 快速开始
 
@@ -16,16 +16,16 @@
 ```bash
 pnpm install
 pnpm build
-PORT=3001 pnpm start
+pnpm start
 ```
 
 启动后会监听：
 
-- `http://127.0.0.1:<PORT>/mcp`（默认 `PORT=3001`）
+- `http://127.0.0.1:<PORT>/mcp`（默认 `PORT=7545`）
 
 ## 环境变量
 
-- `PORT`：监听端口（默认 `3001`）
+- `PORT`：监听端口（默认 `7545`）
 - `HOST`：监听地址（默认 `127.0.0.1`；Docker 部署建议 `0.0.0.0`）
 - `MCP_BEARER_TOKENS`：保护 `/mcp` 的 Bearer Token（逗号分隔多个）
 - `REDIS_URL`：Redis 连接串（用于按 IP 限流与 SSE 并发上限）
@@ -84,7 +84,7 @@ location / {
 
 ### TimeInput（时间输入）
 
-`time.convert` / `time.shift` 使用同一套输入结构：
+`time_convert` / `time_shift` 使用同一套输入结构：
 
 ```ts
 {
@@ -118,7 +118,7 @@ location / {
 
 ## 工具说明
 
-### `time.now`
+### `time_now`
 
 获取当前时间（默认 UTC），并在目标时区输出多种格式。
 
@@ -132,7 +132,7 @@ location / {
 - `utc_iso`：当前 UTC 时间的 ISO
 - `timezone` + 相关格式字段（由 `formats` 决定）
 
-### `time.convert`
+### `time_convert`
 
 把一个时间输入转换到多个输出时区。
 
@@ -144,7 +144,7 @@ location / {
 
 输出：`base_utc_iso`（输入解析后的 UTC 基准）与 `results[]`（每个时区的格式化结果）。
 
-### `time.shift`
+### `time_shift`
 
 对基准时间做偏移（负数回到过去）。
 
@@ -157,7 +157,7 @@ location / {
 
 输出：`base_utc_iso`、`shifted_utc_iso` 与 `shifted`（按目标时区格式化的结果）。
 
-### `time.range`
+### `time_range`
 
 获取常见时间范围的起止（先在目标时区计算自然日/周边界，再转回 UTC 并同时输出多格式）。
 

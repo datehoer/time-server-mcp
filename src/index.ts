@@ -125,7 +125,7 @@ const server = new McpServer({
 
 // time.now
 server.tool(
-  "time.now",
+  "time_now",
   "Get current time (default UTC) or in a specified IANA timezone.",
   {
     timezone: z.string().describe("IANA timezone, e.g. Asia/Singapore").optional(),
@@ -156,7 +156,7 @@ server.tool(
 
 // time.convert
 server.tool(
-  "time.convert",
+  "time_convert",
   "Convert a time input into multiple output timezones.",
   {
     time: TimeInputSchema.describe("Time input {type, value, input_timezone?}"),
@@ -189,7 +189,7 @@ server.tool(
 
 // time.shift（一天前/一周前/任意偏移）
 server.tool(
-  "time.shift",
+  "time_shift",
   "Shift a base time by a duration delta (negative values go to the past).",
   {
     base_time: TimeInputSchema.optional().describe("Optional base time; omit to use now()"),
@@ -232,7 +232,7 @@ server.tool(
 
 // time.range（常见范围：today/this_week/last_week…）
 server.tool(
-  "time.range",
+  "time_range",
   "Get start/end of common ranges (today, yesterday, this_week, last_week, last_7_days) in a timezone.",
   {
     range: z.enum(["today", "yesterday", "this_week", "last_week", "last_7_days"]),
