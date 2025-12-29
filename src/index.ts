@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DateTime, DurationLikeObject } from "luxon";
 import { z } from "zod";
 import { createClient } from "redis";
@@ -355,6 +355,13 @@ if (bearerTokens.length === 0) {
   console.warn("Bearer auth disabled: set MCP_BEARER_TOKENS (or MCP_BEARER_TOKEN) to protect /mcp.");
 }
 
+function bearerTokenId(token: string) {
+  return createHash("sha256").update(token).digest("hex").slice(0, 12);
+}
+
+const bearerTokenIds = bearerTokens.map(bearerTokenId);
+const bearerTokenLastUsedMsById = new Map<string, number>();
+
 function requireBearer(req: Request, res: Response) {
   if (bearerTokens.length === 0) return true;
   const auth = req.header("authorization") ?? "";
@@ -364,10 +371,15 @@ function requireBearer(req: Request, res: Response) {
     return false;
   }
   const token = auth.slice(prefix.length);
-  if (!bearerTokens.some((t) => safeEqual(t, token))) {
+  let matchedId: string | null = null;
+  for (let i = 0; i < bearerTokens.length; i++) {
+    if (safeEqual(bearerTokens[i]!, token)) matchedId = bearerTokenIds[i] ?? null;
+  }
+  if (!matchedId) {
     res.status(401).send("Unauthorized");
     return false;
   }
+  bearerTokenLastUsedMsById.set(matchedId, Date.now());
   return true;
 }
 
@@ -408,6 +420,14 @@ if (adminUser && adminPass && adminCookieSecret) {
       transports: Object.keys(transports).length,
       limits: { rate_limit_per_ip_per_minute: rateLimitPerMinute, sse_max_conns_per_ip: sseMaxConnsPerIp },
       redis: Boolean(redis),
+      auth: {
+        bearer_enabled: bearerTokens.length > 0,
+        bearer_token_count: bearerTokens.length,
+        bearer_tokens: bearerTokenIds.map((id) => ({
+          id,
+          last_used_iso: bearerTokenLastUsedMsById.has(id) ? new Date(bearerTokenLastUsedMsById.get(id)!).toISOString() : null,
+        })),
+      },
     }),
   );
 } else {
