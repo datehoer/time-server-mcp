@@ -33,6 +33,10 @@ function utcDayRange(d = new Date()) {
   return { dayStartIso: dayStart.toISOString(), dayEndIso: dayEnd.toISOString(), utcDay };
 }
 
+function utcYmdKey(d: Date) {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
 export function registerDashboardRoutes(
   app: Express,
   deps: {
@@ -74,7 +78,7 @@ export function registerDashboardRoutes(
 <div class="shell">
   <div class="auth">
     <div class="brand" style="justify-content:center;margin-bottom:14px">
-      <div class="logo">MCP</div>
+      <div class="logo"><img class="logo-img" src="/assets/logo.png" alt="MCP" width="28" height="28" /></div>
       <div>
         <div class="brand-title">Time Server</div>
         <div class="muted" style="font-size:12px">Dashboard</div>
@@ -113,7 +117,7 @@ export function registerDashboardRoutes(
 <div class="shell">
   <div class="auth">
     <div class="brand" style="justify-content:center;margin-bottom:14px">
-      <div class="logo">MCP</div>
+      <div class="logo"><img class="logo-img" src="/assets/logo.png" alt="MCP" width="28" height="28" /></div>
       <div>
         <div class="brand-title">Time Server</div>
         <div class="muted" style="font-size:12px">Dashboard</div>
@@ -208,6 +212,9 @@ export function registerDashboardRoutes(
     if (!meRow || meRow.disabled_at) return res.status(401).json({ ok: false, error: "Account disabled" });
 
     const { dayStartIso, dayEndIso, utcDay } = utcDayRange(new Date());
+    const dayStart = new Date(dayStartIso);
+    const last7Start = new Date(dayStart);
+    last7Start.setUTCDate(last7Start.getUTCDate() - 6);
 
     const totals = await db.query<{ allowed: string | null; denied: string | null }>(
       `
@@ -219,6 +226,57 @@ WHERE account_id=$1 AND ts >= $2 AND ts < $3
 `,
       [s.accountId, dayStartIso, dayEndIso],
     );
+
+    // 折线图：按 UTC 的“小时/日”聚合，并在服务端补齐缺口（前端直接渲染）。
+    const hourlyTotals = await db.query<{ hour_utc: number | string; allowed: string | null; denied: string | null }>(
+      `
+SELECT
+  EXTRACT(HOUR FROM ts AT TIME ZONE 'UTC')::int AS hour_utc,
+  SUM(CASE WHEN allowed THEN 1 ELSE 0 END)::text AS allowed,
+  SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END)::text AS denied
+FROM request_logs
+WHERE account_id=$1 AND ts >= $2 AND ts < $3
+GROUP BY 1
+ORDER BY 1
+`,
+      [s.accountId, dayStartIso, dayEndIso],
+    );
+    const hourBuckets = new Map<number, { allowed: number; denied: number }>();
+    for (const r of hourlyTotals.rows) {
+      const hour = Number(r.hour_utc);
+      if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+      hourBuckets.set(hour, { allowed: Number(r.allowed ?? "0"), denied: Number(r.denied ?? "0") });
+    }
+    const hourlyLabels = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
+    const hourlyAllowed = hourlyLabels.map((_, h) => hourBuckets.get(h)?.allowed ?? 0);
+    const hourlyDenied = hourlyLabels.map((_, h) => hourBuckets.get(h)?.denied ?? 0);
+
+    const dailyTotalsLast7 = await db.query<{ day_utc: string; allowed: string | null; denied: string | null }>(
+      `
+SELECT
+  ((ts AT TIME ZONE 'UTC')::date)::text AS day_utc,
+  SUM(CASE WHEN allowed THEN 1 ELSE 0 END)::text AS allowed,
+  SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END)::text AS denied
+FROM request_logs
+WHERE account_id=$1 AND ts >= $2 AND ts < $3
+GROUP BY 1
+ORDER BY 1
+`,
+      [s.accountId, last7Start.toISOString(), dayEndIso],
+    );
+    const dayBuckets = new Map<string, { allowed: number; denied: number }>();
+    for (const r of dailyTotalsLast7.rows) {
+      const key = String(r.day_utc ?? "");
+      if (!key) continue;
+      dayBuckets.set(key, { allowed: Number(r.allowed ?? "0"), denied: Number(r.denied ?? "0") });
+    }
+    const dailyLabels = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(last7Start);
+      d.setUTCDate(d.getUTCDate() + i);
+      return utcYmdKey(d);
+    });
+    const dailyAllowed = dailyLabels.map((k) => dayBuckets.get(k)?.allowed ?? 0);
+    const dailyDenied = dailyLabels.map((k) => dayBuckets.get(k)?.denied ?? 0);
 
     const byKey = await db.query<{ api_key_id: string; allowed: string; denied: string }>(
       `
@@ -281,6 +339,10 @@ LIMIT 20
           };
         }),
       },
+      charts: {
+        hourly_today: { labels: hourlyLabels, allowed: hourlyAllowed, denied: hourlyDenied },
+        daily_last_7d: { labels: dailyLabels, allowed: dailyAllowed, denied: dailyDenied },
+      },
       connect: {
         mcp_url: mcpUrl,
         health_url: healthUrl,
@@ -301,7 +363,7 @@ LIMIT 20
     <div class="container">
       <div class="topbar-inner">
         <div class="brand">
-          <div class="logo">MCP</div>
+          <div class="logo"><img class="logo-img" src="/assets/logo.png" alt="MCP" width="28" height="28" /></div>
           <div class="brand-title">Time Server</div>
           <div class="workspace" title="Workspace">
             <span>Personal</span>
@@ -352,17 +414,37 @@ LIMIT 20
                 </div>
                 <span class="badge badge-ok">Signed In</span>
               </div>
-              <div style="display:grid;gap:12px;margin-top:14px">
-                <div class="field">
-                  <div class="kicker" style="width:74px;flex:0 0 auto">Account</div>
-                  <input id="acct" readonly value="loading…" class="mono" />
+	              <div style="display:grid;gap:12px;margin-top:14px">
+	                <div class="field">
+	                  <div class="kicker" style="width:74px;flex:0 0 auto">Account</div>
+	                  <input id="acct" readonly value="loading…" class="mono" />
+	                </div>
+	                <div class="field" id="quotaField">
+	                  <div class="kicker" style="width:74px;flex:0 0 auto">Quota</div>
+	                  <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
+	                    <div id="quotaChart" aria-hidden="true" style="width:56px;height:56px;flex:0 0 auto"></div>
+	                    <div style="min-width:0">
+	                      <div class="mono" id="quotaMain" style="line-height:1.2">loading…</div>
+	                      <div class="muted" id="quotaSub" style="font-size:12px;line-height:1.2">—</div>
+	                    </div>
+	                  </div>
+	                </div>
+	                <div class="muted" id="status" style="font-size:12px"></div>
+	              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:18px">
+            <div class="card-pad">
+              <div class="section-head">
+                <div>
+                  <h2 class="section-title">Trends (UTC)</h2>
+                  <div class="section-desc">近 7 天 <span class="mono">tools/call</span> 趋势（allowed/denied）。</div>
                 </div>
-                <div class="field">
-                  <div class="kicker" style="width:74px;flex:0 0 auto">Quota</div>
-                  <input id="quota" readonly value="loading…" class="mono" />
-                </div>
-                <div class="muted" id="status" style="font-size:12px"></div>
               </div>
+            </div>
+            <div class="card-pad" style="padding-top:0">
+              <div class="chart" id="chartDaily7d"></div>
             </div>
           </div>
         </section>
@@ -377,6 +459,9 @@ LIMIT 20
                 </div>
                 <span class="badge" id="usageBadge">loading…</span>
               </div>
+            </div>
+            <div class="card-pad" style="padding-top:0">
+              <div class="chart" id="chartHourlyToday"></div>
             </div>
             <table class="table" aria-label="Usage by key">
               <thead>
@@ -520,6 +605,7 @@ LIMIT 20
       </div>
     </div>
   </main>
+  <script src="/assets/echarts.min.js"></script>
 </div>
         `,
         scripts: `
@@ -544,11 +630,97 @@ LIMIT 20
             function esc(s){ return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
             const copyIcon = ${JSON.stringify(iconCopySvg())};
 
+            // 折线图：ECharts（无 bundler，直接从 /assets/echarts.min.js 取）
+            const chartInstances = Object.create(null);
+            function cssHslVar(name, fallback){
+              try{
+                const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+                return v ? ('hsl(' + v + ')') : fallback;
+              }catch(_){ return fallback; }
+            }
+            function renderLineChart(elId, title, labels, allowed, denied){
+              if(!window.echarts) return;
+              const el = document.getElementById(elId);
+              if(!el) return;
+              const chart = chartInstances[elId] || (chartInstances[elId] = window.echarts.init(el));
+              const colorOk = cssHslVar('--primary', 'hsl(142 71% 30%)');
+              const colorBad = 'hsl(0 72% 35%)';
+              chart.setOption({
+                animation: false,
+                title: { text: title || '', left: 0, top: 0, textStyle: { fontSize: 12, fontWeight: 650 } },
+                tooltip: { trigger: 'axis' },
+                legend: { top: 26, right: 0, data: ['allowed', 'denied'], itemGap: 14, selectedMode: false },
+                grid: { left: 44, right: 16, top: 64, bottom: 40, containLabel: true },
+                xAxis: { type: 'category', data: labels || [], axisLabel: { hideOverlap: true, margin: 12 } },
+                yAxis: { type: 'value', axisLabel: { margin: 12 } },
+                color: [colorOk, colorBad],
+                series: [
+                  {
+                    name: 'allowed',
+                    type: 'line',
+                    data: allowed || [],
+                    smooth: true,
+                    showSymbol: false,
+                    lineStyle: { width: 2 },
+                    emphasis: { disabled: true },
+                    select: { disabled: true },
+                  },
+                  {
+                    name: 'denied',
+                    type: 'line',
+                    data: denied || [],
+                    smooth: true,
+                    showSymbol: false,
+                    lineStyle: { width: 2 },
+                    emphasis: { disabled: true },
+                    select: { disabled: true },
+                  },
+                ],
+              }, { notMerge: true });
+            }
+
+            // Quota 圆环图：used vs remaining（超额时整圈标红，并在文本提示超额）
+            function renderQuotaDonut(elId, used, limit){
+              if(!window.echarts) return;
+              const el = document.getElementById(elId);
+              if(!el) return;
+              const chart = chartInstances[elId] || (chartInstances[elId] = window.echarts.init(el));
+              const u = Math.max(0, Number(used)||0);
+              const l = Math.max(0, Number(limit)||0);
+              const over = (l > 0) && (u > l);
+              const pct = (l > 0) ? Math.round((u / l) * 100) : 0;
+              const colorOk = cssHslVar('--primary', 'hsl(142 71% 30%)');
+              const colorBad = 'hsl(0 72% 35%)';
+              const colorRest = cssHslVar('--muted', 'hsl(210 40% 96%)');
+              const usedColor = over ? colorBad : colorOk;
+              const label = (l > 0) ? (String(pct) + '%') : '—';
+              chart.setOption({
+                animation: false,
+                tooltip: { show: false },
+                series: [{
+                  type: 'pie',
+                  radius: ['70%','95%'],
+                  center: ['50%','50%'],
+                  silent: true,
+                  labelLine: { show: false },
+                  label: { show: true, position: 'center', formatter: label, fontSize: 12, fontWeight: 750, color: usedColor },
+                  data: (l > 0)
+                    ? [{ value: Math.min(u, l), name: 'used' }, { value: Math.max(l - u, 0), name: 'remaining' }]
+                    : [{ value: u || 1, name: 'used' }],
+                  color: [usedColor, colorRest],
+                }],
+              }, { notMerge: true });
+            }
+            function resizeCharts(){
+              Object.keys(chartInstances).forEach((k) => { try{ chartInstances[k].resize(); }catch(_){} });
+            }
+
             function setTab(group, id){
               var buttons = document.querySelectorAll('[data-tab-group="'+group+'"][data-tab]');
               buttons.forEach(function(b){ b.dataset.active = (b.dataset.tab === id) ? "true" : "false"; });
               var panels = document.querySelectorAll('[data-tab-panel-group="'+group+'"][data-tab-panel]');
               panels.forEach(function(p){ p.style.display = (p.dataset.tabPanel === id) ? "block" : "none"; });
+              setTimeout(resizeCharts, 0);
             }
 
             document.addEventListener('click', function(e){
@@ -642,8 +814,18 @@ LIMIT 20
 
               const acctEl = document.getElementById('acct');
               if(acctEl) acctEl.value = (j.account && (j.account.email || j.account.id)) || '';
-              const quotaEl = document.getElementById('quota');
-              if(quotaEl && j.quota) quotaEl.value = 'UTC · tools/call · ' + String(j.quota.used_today) + '/' + String(j.quota.daily_limit);
+              const quotaMainEl = document.getElementById('quotaMain');
+              const quotaSubEl = document.getElementById('quotaSub');
+              if(j.quota){
+                const used = Number(j.quota.used_today||0);
+                const limit = Number(j.quota.daily_limit||0);
+                const pct = (limit>0) ? Math.round((used/limit)*100) : 0;
+                const remaining = Math.max(limit - used, 0);
+                const over = Math.max(used - limit, 0);
+                if(quotaMainEl) quotaMainEl.textContent = '已用 ' + String(used) + '/' + String(limit) + '（' + String(pct) + '%）';
+                if(quotaSubEl) quotaSubEl.textContent = 'UTC · tools/call · ' + (over>0 ? ('超额 ' + String(over)) : ('剩余 ' + String(remaining)));
+                renderQuotaDonut('quotaChart', used, limit);
+              }
 
               const o = j.overview || {};
               const cards = document.getElementById('overviewCards');
@@ -674,6 +856,15 @@ LIMIT 20
                     + '</tr>';
                   }).join('');
                 }
+              }
+
+              if(!window.echarts){
+                flash('ECharts 未加载（检查 /assets/echarts.min.js）');
+              }else{
+                const c = j.charts || {};
+                if(c.daily_last_7d) renderLineChart('chartDaily7d', '近 7 天（UTC）', c.daily_last_7d.labels, c.daily_last_7d.allowed, c.daily_last_7d.denied);
+                if(c.hourly_today) renderLineChart('chartHourlyToday', '今日 24 小时（UTC）', c.hourly_today.labels, c.hourly_today.allowed, c.hourly_today.denied);
+                setTimeout(resizeCharts, 0);
               }
 
               const mcpUrl = j.connect && j.connect.mcp_url ? String(j.connect.mcp_url) : '';
@@ -769,6 +960,13 @@ LIMIT 20
               await loadStats();
               await loadKeys();
             })().catch(()=>flash('加载失败'));
+
+            // 窗口缩放时，确保折线图自适应（避免隐藏 tab 重新显示后尺寸为 0）
+            let resizeTimer = null;
+            window.addEventListener('resize', () => {
+              if(resizeTimer) clearTimeout(resizeTimer);
+              resizeTimer = setTimeout(resizeCharts, 120);
+            });
           })();
         `,
       }),

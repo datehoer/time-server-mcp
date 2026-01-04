@@ -118,7 +118,7 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
 <div class="shell">
   <div class="auth">
     <div class="brand" style="justify-content:center;margin-bottom:14px">
-      <div class="logo">MCP</div>
+      <div class="logo"><img class="logo-img" src="/assets/logo.png" alt="MCP" width="28" height="28" /></div>
       <div>
         <div class="brand-title">Time Server</div>
         <div class="muted" style="font-size:12px">Admin</div>
@@ -317,7 +317,7 @@ LIMIT 50
     <div class="container">
       <div class="topbar-inner">
         <div class="brand">
-          <div class="logo">MCP</div>
+          <div class="logo"><img class="logo-img" src="/assets/logo.png" alt="MCP" width="28" height="28" /></div>
           <div class="brand-title">Time Server</div>
           <div class="workspace" title="Workspace">
             <span>Admin</span>
@@ -373,6 +373,24 @@ LIMIT 50
             <div class="value">${sseMax ? `${sseMax}` : "—"}</div>
             <div class="sub">Per IP</div>
           </article>
+        </div>
+
+        <div class="card">
+          <div class="card-pad">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">Usage Charts (UTC)</h2>
+                <div class="section-desc">全局 <span class="mono">tools/call</span> 趋势（allowed/denied）。</div>
+              </div>
+              <span class="badge" id="chartsBadge">loading…</span>
+            </div>
+            <div class="muted" id="chartsStatus" style="font-size:12px;margin-top:8px"></div>
+          </div>
+          <div class="card-pad" style="padding-top:0">
+            <div class="chart" id="adminChartHourly"></div>
+            <div style="height:12px"></div>
+            <div class="chart" id="adminChartDaily7d"></div>
+          </div>
         </div>
 
         <div class="card">
@@ -484,7 +502,101 @@ LIMIT 50
       </div>
     </div>
   </main>
+  <script src="/assets/echarts.min.js"></script>
 </div>
+        `,
+        scripts: `
+          (function(){
+            const badge = document.getElementById('chartsBadge');
+            const status = document.getElementById('chartsStatus');
+            function setStatus(msg){
+              if(status) status.textContent = msg || '';
+            }
+            function cssHslVar(name, fallback){
+              try{
+                const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+                return v ? ('hsl(' + v + ')') : fallback;
+              }catch(_){ return fallback; }
+            }
+            function renderLine(elId, title, labels, allowed, denied){
+              if(!window.echarts) return;
+              const el = document.getElementById(elId);
+              if(!el) return;
+              const chart = window.echarts.init(el);
+              const colorOk = cssHslVar('--primary', 'hsl(142 71% 30%)');
+              const colorBad = 'hsl(0 72% 35%)';
+              chart.setOption({
+                animation:false,
+                title:{ text:title||'', left:0, top:0, textStyle:{ fontSize:12, fontWeight:650 } },
+                tooltip:{ trigger:'axis' },
+                legend:{ top:26, right:0, data:['allowed','denied'], itemGap:14, selectedMode:false },
+                grid:{ left:44, right:16, top:64, bottom:40, containLabel:true },
+                xAxis:{ type:'category', data: labels || [], axisLabel:{ hideOverlap:true, margin:12 } },
+                yAxis:{ type:'value', axisLabel:{ margin:12 } },
+                color:[colorOk, colorBad],
+                series:[
+                  {
+                    name:'allowed',
+                    type:'line',
+                    data: allowed || [],
+                    smooth:true,
+                    showSymbol:false,
+                    lineStyle:{ width:2 },
+                    emphasis:{ disabled:true },
+                    select:{ disabled:true },
+                  },
+                  {
+                    name:'denied',
+                    type:'line',
+                    data: denied || [],
+                    smooth:true,
+                    showSymbol:false,
+                    lineStyle:{ width:2 },
+                    emphasis:{ disabled:true },
+                    select:{ disabled:true },
+                  },
+                ],
+              }, { notMerge:true });
+              return chart;
+            }
+
+            if(!window.echarts){
+              if(badge) badge.textContent = 'ECharts missing';
+              setStatus('ECharts 未加载（检查 /assets/echarts.min.js）');
+              return;
+            }
+
+            let charts = [];
+            function resizeAll(){
+              charts.forEach((c)=>{ try{ c.resize(); }catch(_){} });
+            }
+            let resizeTimer = null;
+            window.addEventListener('resize', () => {
+              if(resizeTimer) clearTimeout(resizeTimer);
+              resizeTimer = setTimeout(resizeAll, 120);
+            });
+
+            (async function(){
+              const r = await fetch('/admin/api/stats', { credentials:'same-origin' });
+              if(r.status===401){ location.href='/admin/login'; return; }
+              const j = await r.json().catch(()=>null);
+              const dbs = j && j.db_stats ? j.db_stats : null;
+              if(!dbs){
+                if(badge) badge.textContent = 'DB Off';
+                setStatus('DB 未启用或统计快照不可用，无法生成折线图。');
+                return;
+              }
+              if(badge) badge.textContent = (dbs.utc_day || 'UTC') + ' · global';
+              setStatus('');
+
+              const h = dbs.tool_calls_hourly_today;
+              const d = dbs.tool_calls_daily_last_7d;
+              if(h) charts.push(renderLine('adminChartHourly', '今日 24 小时（UTC）', h.labels, h.allowed, h.denied));
+              if(d) charts.push(renderLine('adminChartDaily7d', '近 7 天（UTC）', d.labels, d.allowed, d.denied));
+              charts = charts.filter(Boolean);
+              setTimeout(resizeAll, 0);
+            })().catch(()=>setStatus('加载折线图失败'));
+          })();
         `,
       }),
     );

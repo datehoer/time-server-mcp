@@ -17,6 +17,9 @@
 pnpm install
 pnpm build
 pnpm start
+
+# 本地启动
+set -a; source .env; set +a; pnpm start
 ```
 
 启动后会监听：

@@ -1,6 +1,8 @@
 import express, { Request, Response } from "express";
 import cookieParser from "cookie-parser";
 import { createHash, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { DateTime, DurationLikeObject } from "luxon";
 import { z } from "zod";
 import { createClient } from "redis";
@@ -335,6 +337,32 @@ app.use("/me", express.json({ limit: "16kb" }));
 app.use("/dashboard", express.urlencoded({ extended: false, limit: "16kb" }));
 app.use("/dashboard", express.json({ limit: "16kb" }));
 
+// 静态资源：ECharts（通过 pnpm 安装到 node_modules；不依赖外网 CDN）
+const require = createRequire(import.meta.url);
+let echartsDistPath: string | null = null;
+try {
+  echartsDistPath = require.resolve("echarts/dist/echarts.min.js");
+} catch {
+  echartsDistPath = null;
+}
+if (echartsDistPath) {
+  app.get("/assets/echarts.min.js", (_req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.type("application/javascript").sendFile(echartsDistPath!);
+  });
+} else {
+  console.warn("ECharts asset disabled: run `pnpm add echarts` to enable /assets/echarts.min.js.");
+}
+
+// 静态资源：项目 public/（logo 等）。使用绝对路径，避免在非项目根目录启动时找不到资源。
+const publicDir = fileURLToPath(new URL("../public", import.meta.url));
+app.use("/assets", express.static(publicDir, { maxAge: 86_400_000, index: false }));
+
+// 浏览器/系统常会默认请求这些根路径图标；这里重定向到 /assets，避免 404。
+app.get("/favicon.svg", (_req: Request, res: Response) => res.redirect(302, "/assets/favicon-32x32.png"));
+app.get("/apple-touch-icon.png", (_req: Request, res: Response) => res.redirect(302, "/assets/apple-touch-icon.png"));
+app.get("/site.webmanifest", (_req: Request, res: Response) => res.redirect(302, "/assets/site.webmanifest"));
+
 // sessionId -> transport
 const transports: Record<string, StreamableHTTPServerTransport> = {};
 
@@ -368,6 +396,8 @@ if (db) {
       const now = new Date();
       const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
       const dayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+      const last7Start = new Date(dayStart);
+      last7Start.setUTCDate(last7Start.getUTCDate() - 6);
 
       const accounts = await db.query<{ n: string }>("SELECT COUNT(*)::text AS n FROM accounts");
       const activeKeys = await db.query<{ n: string }>("SELECT COUNT(*)::text AS n FROM api_keys WHERE revoked_at IS NULL");
@@ -380,6 +410,34 @@ FROM request_logs
 WHERE ts >= $1 AND ts < $2
 `,
         [dayStart.toISOString(), dayEnd.toISOString()],
+      );
+
+      const hourlyTotals = await db.query<{ hour_utc: number | string; allowed: string | null; denied: string | null }>(
+        `
+SELECT
+  EXTRACT(HOUR FROM ts AT TIME ZONE 'UTC')::int AS hour_utc,
+  SUM(CASE WHEN allowed THEN 1 ELSE 0 END)::text AS allowed,
+  SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END)::text AS denied
+FROM request_logs
+WHERE ts >= $1 AND ts < $2
+GROUP BY 1
+ORDER BY 1
+`,
+        [dayStart.toISOString(), dayEnd.toISOString()],
+      );
+
+      const dailyTotalsLast7 = await db.query<{ day_utc: string; allowed: string | null; denied: string | null }>(
+        `
+SELECT
+  to_char(ts AT TIME ZONE 'UTC', 'YYYYMMDD') AS day_utc,
+  SUM(CASE WHEN allowed THEN 1 ELSE 0 END)::text AS allowed,
+  SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END)::text AS denied
+FROM request_logs
+WHERE ts >= $1 AND ts < $2
+GROUP BY 1
+ORDER BY 1
+`,
+        [last7Start.toISOString(), dayEnd.toISOString()],
       );
 
       const topKeys = await db.query<{ api_key_id: string; allowed: string; denied: string }>(
@@ -406,6 +464,32 @@ LIMIT 10
           : { rows: [] as any[] };
 
       const metaById = new Map<string, any>(keyMeta.rows.map((r) => [r.id, r]));
+
+      // 折线图：按 UTC 补齐缺口（便于前端直接渲染）
+      const hourBuckets = new Map<number, { allowed: number; denied: number }>();
+      for (const r of hourlyTotals.rows) {
+        const hour = Number(r.hour_utc);
+        if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+        hourBuckets.set(hour, { allowed: Number(r.allowed ?? "0"), denied: Number(r.denied ?? "0") });
+      }
+      const hourlyLabels = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
+      const hourlyAllowed = hourlyLabels.map((_, h) => hourBuckets.get(h)?.allowed ?? 0);
+      const hourlyDenied = hourlyLabels.map((_, h) => hourBuckets.get(h)?.denied ?? 0);
+
+      const dayBuckets = new Map<string, { allowed: number; denied: number }>();
+      for (const r of dailyTotalsLast7.rows) {
+        const key = String(r.day_utc ?? "");
+        if (!key) continue;
+        dayBuckets.set(key, { allowed: Number(r.allowed ?? "0"), denied: Number(r.denied ?? "0") });
+      }
+      const dailyLabels = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(last7Start);
+        d.setUTCDate(d.getUTCDate() + i);
+        return utcDayKey(d);
+      });
+      const dailyAllowed = dailyLabels.map((k) => dayBuckets.get(k)?.allowed ?? 0);
+      const dailyDenied = dailyLabels.map((k) => dayBuckets.get(k)?.denied ?? 0);
+
       adminDbSnapshot = {
         utc_day: utcDayKey(now),
         accounts: Number(accounts.rows[0]?.n ?? "0"),
@@ -414,6 +498,8 @@ LIMIT 10
           allowed: Number(todayTotals.rows[0]?.allowed ?? "0"),
           denied: Number(todayTotals.rows[0]?.denied ?? "0"),
         },
+        tool_calls_hourly_today: { labels: hourlyLabels, allowed: hourlyAllowed, denied: hourlyDenied },
+        tool_calls_daily_last_7d: { labels: dailyLabels, allowed: dailyAllowed, denied: dailyDenied },
         top_api_keys_today: topKeys.rows.map((r) => {
           const meta = metaById.get(r.api_key_id);
           return {

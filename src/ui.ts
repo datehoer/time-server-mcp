@@ -58,7 +58,9 @@ export function baseStyles() {
       font-weight:700;font-size:12px;letter-spacing:0.02em;
       box-shadow:var(--shadow-sm);
       flex:0 0 auto;
+      overflow:hidden;
     }
+    .logo-img{width:100%;height:100%;object-fit:cover;display:block}
     .brand-title{font-weight:650}
     .workspace{
       display:inline-flex;align-items:center;gap:8px;
@@ -115,6 +117,10 @@ export function baseStyles() {
     .grid{display:grid;gap:14px}
     .grid-4{grid-template-columns:repeat(1,minmax(0,1fr))}
     @media (min-width: 720px){.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}}
+
+    /* 折线图容器（ECharts） */
+    .chart{width:100%;height:320px}
+    @media (max-width: 720px){.chart{height:260px}}
 
     /* Dashboard「API」页：长命令/JSON 在 grid 下容易撑破布局，这里强制可收缩并启用视觉换行 */
     .api-grid{display:grid;gap:12px;grid-template-columns:minmax(0,1fr)}
@@ -245,6 +251,14 @@ export function layoutHtml(opts: { title: string; body: string; scripts?: string
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>${escapeHtml(opts.title)}</title>
+  <!-- 站点图标（Tab/Favicon） -->
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png" />
+  <link rel="manifest" href="/assets/site.webmanifest" />
+  <link rel="shortcut icon" href="/favicon.svg" />
+  <meta name="theme-color" content="#0b1220" />
   <style>${baseStyles()}</style>
 </head>
 <body>
