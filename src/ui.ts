@@ -106,6 +106,29 @@ export function baseStyles() {
     main{padding:28px 0 48px}
     .stack{display:flex;flex-direction:column;gap:22px}
 
+    /* Home：主页布局（避免行内样式；尽量用留白而非边框） */
+    .home{display:flex;flex-direction:column;gap:3.5rem}
+    .hero{padding:0.5rem 0}
+    .hero-grid{display:grid;gap:1.75rem;align-items:start}
+    @media (min-width: 960px){.hero-grid{grid-template-columns:minmax(0,1.2fr) minmax(0,0.8fr)}}
+    .hero-title{margin:0.5rem 0 0;font-size:2.5rem;line-height:1.1;letter-spacing:-0.02em}
+    @media (max-width: 720px){.hero-title{font-size:2rem}}
+    .hero-lede{margin:0.75rem 0 0;font-size:1rem;color:hsl(var(--muted-foreground));max-width:56ch}
+    .hero-actions{margin-top:1.25rem;display:flex;flex-wrap:wrap;gap:0.625rem}
+    .hero-aside{display:flex;flex-direction:column;gap:0.75rem}
+    .spec{
+      display:grid;gap:0.625rem;
+      padding:0.875rem 1rem;
+      border:1px solid hsl(var(--border));
+      border-radius:calc(var(--radius) + 6px);
+      background:hsl(var(--popover));
+    }
+    .spec .row{display:flex;justify-content:space-between;gap:0.875rem;align-items:baseline}
+    .spec .key{font-size:0.75rem;color:hsl(var(--muted-foreground));font-weight:650}
+    .spec .val{font-size:0.875rem}
+    .links{display:flex;flex-wrap:wrap;gap:0.875rem}
+    .links a{font-size:0.875rem;color:hsl(var(--muted-foreground))}
+
     .tabs{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
     .tab{
       height:34px;padding:0 12px;border-radius:999px;border:1px solid hsl(var(--border));

@@ -24,11 +24,13 @@ import { registerAdminRoutes } from "./admin.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerMeRoutes } from "./me.js";
 import { registerDashboardRoutes } from "./dashboard.js";
+import { registerHomeRoutes } from "./home.js";
 import { requireApiKey } from "./mcpAuth.js";
 import { incrDailyIfBelow, incrDailyPairIfBelow, secondsUntilNextUtcDay, utcDayKey } from "./mcpQuota.js";
 import { getGlobalDailyLimitCached, getToolDailyLimitCached } from "./quota.js";
 import { createRequestLogBuffer } from "./requestLog.js";
 import { createApiKeyLastUsedTracker } from "./lastUsed.js";
+import { escapeHtml, layoutHtml } from "./ui.js";
 
 /* -----------------------------
  * Helpers
@@ -388,6 +390,9 @@ if (dbAuthEnabled && !cfg.API_KEY_ENCRYPTION_SECRET) {
   throw new Error("AUTH_MODE=db|both requires API_KEY_ENCRYPTION_SECRET (32 bytes base64).");
 }
 
+// 主页：始终启用（Dashboard 按能力判断显示入口）
+registerHomeRoutes(app, { dashboardEnabled: dbAuthEnabled && Boolean(db) && Boolean(redis), authMode });
+
 // /admin 需要同步返回 stats；这里用后台定时刷新 DB 统计快照
 let adminDbSnapshot: any = null;
 if (db) {
@@ -603,15 +608,146 @@ const ToolsCallSchema = z
   })
   .passthrough();
 
+type HealthPayload = {
+  ok: boolean;
+  uptime_s: number;
+  transports: number;
+  redis: boolean;
+  db: boolean;
+  auth: { mode: string; env_enabled: boolean; db_enabled: boolean };
+};
+
+function getOrigin(req: Request) {
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim() || req.protocol || "http";
+  const host = (req.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim() || req.get("host") || "127.0.0.1";
+  return `${proto}://${host}`;
+}
+
+function pickHealthFormat(req: Request): "json" | "html" {
+  const q = typeof req.query.format === "string" ? req.query.format : "";
+  if (q === "json" || q === "html") return q;
+
+  // 注意：把 json 放在前面，保证 curl/fetch 常见的 Accept: */* 时仍返回 JSON。
+  const preferred = req.accepts(["json", "html"]);
+  return preferred === "html" ? "html" : "json";
+}
+
+function renderHealthHtml(req: Request, payload: HealthPayload) {
+  const origin = getOrigin(req);
+  const curlJson = `curl -sS "${origin}/health?format=json"`;
+  return layoutHtml({
+    title: "Health · Time Server",
+    body: `
+<div class="shell">
+  <header class="topbar">
+    <div class="container">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="logo"><img class="logo-img" src="/assets/logo.png" alt="MCP" width="28" height="28" /></div>
+          <div class="brand-title">Time Server</div>
+          <div class="workspace" title="Auth mode">
+            <span class="mono">${escapeHtml(payload.auth.mode)}</span>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a href="/">Home</a>
+          <a href="/health" data-active="true">Health</a>
+        </nav>
+
+        <div class="actions">
+          <a class="btn" href="/">返回 Home</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      <div class="stack">
+        <section aria-label="Status">
+          <div class="section-head">
+            <div>
+              <div class="kicker">Status</div>
+              <h1 class="value">Health</h1>
+              <div class="section-desc">浏览器访问返回可读页面；程序化访问默认返回 JSON（也可用 <span class="mono">?format=json</span> 强制）。</div>
+            </div>
+            <div>
+              ${
+                payload.ok
+                  ? `<span class="badge badge-ok"><span class="dot dot-ok" aria-hidden="true"></span>OK</span>`
+                  : `<span class="badge badge-danger"><span class="dot dot-danger" aria-hidden="true"></span>ERROR</span>`
+              }
+            </div>
+          </div>
+        </section>
+
+        <section class="grid grid-4" aria-label="Summary">
+          <article class="card card-pad">
+            <div class="kicker">Uptime</div>
+            <div class="value">${escapeHtml(payload.uptime_s)}s</div>
+            <div class="sub">process.uptime()</div>
+          </article>
+          <article class="card card-pad">
+            <div class="kicker">Transports</div>
+            <div class="value">${escapeHtml(payload.transports)}</div>
+            <div class="sub">active sessions</div>
+          </article>
+          <article class="card card-pad">
+            <div class="kicker">Redis</div>
+            <div class="value">${payload.redis ? "Enabled" : "Disabled"}</div>
+            <div class="sub">quota / session</div>
+          </article>
+          <article class="card card-pad">
+            <div class="kicker">Database</div>
+            <div class="value">${payload.db ? "Enabled" : "Disabled"}</div>
+            <div class="sub">accounts / api keys</div>
+          </article>
+        </section>
+
+        <section aria-label="Payload">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">JSON Payload</h2>
+              <div class="section-desc">复制给监控/排障更方便；也可用 <span class="mono">?format=html</span> 强制打开页面。</div>
+            </div>
+          </div>
+          <pre class="mono">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+        </section>
+
+        <section aria-label="CLI">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">CLI</h2>
+              <div class="section-desc">建议显式指定 format，确保稳定行为。</div>
+            </div>
+          </div>
+          <pre class="mono">${escapeHtml(curlJson)}</pre>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+    `,
+  });
+}
+
 app.get("/health", (req: Request, res: Response) => {
-  res.status(200).json({
+  const payload: HealthPayload = {
     ok: true,
     uptime_s: Math.floor(process.uptime()),
     transports: Object.keys(transports).length,
     redis: Boolean(redis),
     db: Boolean(db),
     auth: { mode: authMode, env_enabled: envAuthEnabled, db_enabled: dbAuthEnabled },
-  });
+  };
+
+  const format = pickHealthFormat(req);
+  if (format === "html") {
+    res.status(200).type("html").send(renderHealthHtml(req, payload));
+    return;
+  }
+  res.status(200).json(payload);
 });
 
 const adminUser = process.env.ADMIN_USERNAME ?? "";
