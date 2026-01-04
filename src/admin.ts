@@ -23,8 +23,8 @@ function setCookie(res: Response, name: string, value: string, opts: { maxAgeSec
   res.append("Set-Cookie", parts.join("; "));
 }
 
-function clearCookie(res: Response, name: string) {
-  res.append("Set-Cookie", `${name}=; Path=/; Max-Age=0`);
+function clearCookie(res: Response, name: string, path = "/") {
+  res.append("Set-Cookie", `${name}=; Path=${path}; Max-Age=0`);
 }
 
 function getSession(req: Request, cfg: AdminConfig): SessionPayload | null {
@@ -377,7 +377,7 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, getStats: () => 
       return;
     }
 
-    clearCookie(res, "admin_captcha");
+    clearCookie(res, "admin_captcha", "/admin");
     const exp = Date.now() + cfg.sessionTtlSeconds * 1000;
     const session = signCookie(cfg.cookieSecret, { u: cfg.username, exp } satisfies SessionPayload);
     setCookie(res, "admin_session", session, {
@@ -391,7 +391,9 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, getStats: () => 
   });
 
   app.post("/admin/logout", (req: Request, res: Response) => {
-    clearCookie(res, "admin_session");
+    // 修复：登录时 cookie Path=/admin，登出也必须按相同 path 清理；并兼容历史 path=/
+    clearCookie(res, "admin_session", "/admin");
+    clearCookie(res, "admin_session", "/");
     res.redirect(302, "/admin/login");
   });
 

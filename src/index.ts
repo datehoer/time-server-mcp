@@ -21,6 +21,7 @@ import {
 import { registerAdminRoutes } from "./admin.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerMeRoutes } from "./me.js";
+import { registerDashboardRoutes } from "./dashboard.js";
 import { requireApiKey } from "./mcpAuth.js";
 import { incrDailyIfBelow, incrDailyPairIfBelow, secondsUntilNextUtcDay, utcDayKey } from "./mcpQuota.js";
 import { getGlobalDailyLimitCached, getToolDailyLimitCached } from "./quota.js";
@@ -331,6 +332,8 @@ app.use("/admin", express.urlencoded({ extended: false, limit: "16kb" }));
 app.use("/admin", express.json({ limit: "16kb" }));
 app.use("/auth", express.json({ limit: "16kb" }));
 app.use("/me", express.json({ limit: "16kb" }));
+app.use("/dashboard", express.urlencoded({ extended: false, limit: "16kb" }));
+app.use("/dashboard", express.json({ limit: "16kb" }));
 
 // sessionId -> transport
 const transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -352,6 +355,9 @@ if (dbAuthEnabled && !db) {
 }
 if (dbAuthEnabled && !redis) {
   throw new Error("AUTH_MODE=db|both requires REDIS_URL (Redis) for session + quota.");
+}
+if (dbAuthEnabled && !cfg.API_KEY_ENCRYPTION_SECRET) {
+  throw new Error("AUTH_MODE=db|both requires API_KEY_ENCRYPTION_SECRET (32 bytes base64).");
 }
 
 // /admin 需要同步返回 stats；这里用后台定时刷新 DB 统计快照
@@ -577,6 +583,14 @@ if (dbAuthEnabled && db && redis) {
     redis,
     cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
     maxKeysPerAccount: 10,
+    encryptionSecret: cfg.API_KEY_ENCRYPTION_SECRET!,
+  });
+  registerDashboardRoutes(app, {
+    db,
+    redis,
+    cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
+    ttlSeconds: cfg.AUTH_SESSION_TTL_SECONDS,
+    cookieSecure: cfg.AUTH_COOKIE_SECURE,
   });
 } else {
   console.warn("Account/API key management disabled: set DATABASE_URL, REDIS_URL and AUTH_MODE=db to enable /auth and /me.");

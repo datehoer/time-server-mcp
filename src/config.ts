@@ -22,6 +22,9 @@ export const AppConfigSchema = z.object({
   AUTH_SESSION_TTL_SECONDS: z.coerce.number().int().min(60).default(7 * 24 * 3600),
   AUTH_COOKIE_SECURE: Bool01,
 
+  // 方案B：用于加密存储 API Key 明文（AES-256-GCM，32 bytes base64）
+  API_KEY_ENCRYPTION_SECRET: z.string().optional(),
+
   // 请求日志
   REQUEST_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).default(7),
   REQUEST_LOG_FLUSH_EVERY_MS: z.coerce.number().int().min(200).default(1000),
@@ -40,6 +43,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     AUTH_SESSION_COOKIE_NAME: env.AUTH_SESSION_COOKIE_NAME,
     AUTH_SESSION_TTL_SECONDS: env.AUTH_SESSION_TTL_SECONDS,
     AUTH_COOKIE_SECURE: env.AUTH_COOKIE_SECURE,
+    API_KEY_ENCRYPTION_SECRET: env.API_KEY_ENCRYPTION_SECRET,
     REQUEST_LOG_RETENTION_DAYS: env.REQUEST_LOG_RETENTION_DAYS,
     REQUEST_LOG_FLUSH_EVERY_MS: env.REQUEST_LOG_FLUSH_EVERY_MS,
     REQUEST_LOG_MAX_BUFFER: env.REQUEST_LOG_MAX_BUFFER,

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   name text NOT NULL DEFAULT '',
   prefix text NOT NULL,
   key_hash text NOT NULL UNIQUE,
+  secret_enc text,                       -- 方案B：明文 key 加密存库（可为空以兼容历史 key）
   created_at timestamptz NOT NULL DEFAULT now(),
   last_used_at timestamptz,
   revoked_at timestamptz
@@ -86,4 +87,3 @@ CREATE TABLE IF NOT EXISTS request_logs (
 CREATE INDEX IF NOT EXISTS request_logs_ts_idx ON request_logs(ts);
 CREATE INDEX IF NOT EXISTS request_logs_account_ts_idx ON request_logs(account_id, ts);
 CREATE INDEX IF NOT EXISTS request_logs_key_ts_idx ON request_logs(api_key_id, ts);
-

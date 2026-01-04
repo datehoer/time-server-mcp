@@ -47,10 +47,15 @@ pnpm start
 - `AUTH_SESSION_TTL_SECONDS`：登录态有效期（默认 7 天）
 - `AUTH_COOKIE_SECURE`：是否设置 `Secure` Cookie（默认 `1`；HTTPS 站点建议保持开启）
 - `REQUEST_LOG_RETENTION_DAYS`：请求明细留存天数（默认 `7`；仅记录 `tools/call`）
+- `API_KEY_ENCRYPTION_SECRET`：方案B（可随时复制明文 API Key）所需，32 bytes base64（AES-256-GCM）
+
+生成示例：
+
+`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 
 可选（开启 `/admin`）：
 
-- `ADMIN_USERNAME` / `ADMIN_PASSWORD`：Dashboard 固定账号密码
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD`：Admin 固定账号密码
 - `ADMIN_COOKIE_SECRET`：Cookie 签名密钥
 - `ADMIN_COOKIE_SECURE`：是否设置 `Secure` Cookie（默认 `1`，HTTPS 站点建议保持开启）
 - `ADMIN_SESSION_TTL_SECONDS`：登录态有效期（默认 7 天）
@@ -74,6 +79,8 @@ pnpm start
 
 1) 初始化数据库：执行 `sql/001_init.sql`
 
+如你之前已经初始化过库，请再补跑一次：`sql/002_api_keys_secret_enc.sql`
+
 2) 注册/登录：
 
 - `POST /auth/register`：`{ email, password }`
@@ -85,12 +92,18 @@ pnpm start
 - `GET /me/api-keys`
 - `POST /me/api-keys`：`{ name? }`（每账号最多 10 个，返回 `secret` 仅一次）
 - `DELETE /me/api-keys/:id`
+- `POST /me/api-keys/:id/reveal`：临时解密返回明文（用于 Dashboard 点击复制）
 
 4) 配额说明：
 
 - 仅 `tools/call` 计数
 - 按 UTC 自然日
 - 默认免费额度 `200/天`（可通过套餐/用户组叠加提升）
+
+## Dashboard（用户后台）
+
+- `GET /dashboard/login`、`GET /dashboard/register`：页面版登录/注册
+- `GET /dashboard`：Key 管理与复制（默认仅掩码显示，点复制才临时拉取明文并复制）
 
 ## Docker Compose 部署
 

@@ -26,7 +26,14 @@ export async function requireApiKey(req: Request, res: Response, deps: { db: Db;
   const cached = await deps.redis.get(cacheKey);
   if (cached) {
     const [accountId, apiKeyId] = cached.split(":");
-    if (accountId && apiKeyId) return { accountId, apiKeyId } as ApiKeyAuth;
+    if (accountId && apiKeyId) {
+      const revoked = await deps.redis.get(`akrev:${apiKeyId}`);
+      if (revoked) {
+        res.status(401).send("Unauthorized");
+        return null;
+      }
+      return { accountId, apiKeyId } as ApiKeyAuth;
+    }
   }
 
   const r = await deps.db.query<{ id: string; account_id: string; revoked_at: string | null }>(
@@ -35,6 +42,7 @@ export async function requireApiKey(req: Request, res: Response, deps: { db: Db;
   );
   const row = r.rows[0];
   if (!row || row.revoked_at) {
+    if (row?.id) await deps.redis.set(`akrev:${row.id}`, "1", { EX: 600 });
     res.status(401).send("Unauthorized");
     return null;
   }
