@@ -9,3 +9,4 @@
 2026-01-04T07:27:27Z --- 修复 Docker 运行时报错 s.replaceAll is not a function --- escapeHtml/escapeAttr 入参改为 unknown 并做 String() 兜底，避免非字符串导致崩溃；重建 dist --- 修改了 src/ui.ts work.md
 2026-01-04T07:47:26Z --- Dashboard API 页代码块自动换行/防溢出 --- 修复 grid 下 pre 撑破布局：为 API 区块加 api-grid 宽度约束（minmax(0,1fr)+min-width:0），并启用 pre-wrap+overflow-wrap:anywhere 实现视觉换行 --- 修改了 src/dashboard.ts src/ui.ts work.md
 2026-01-04 16:51:24 --- Dashboard API 页 curl 示例显示太丑（转义符/双重 stringify） --- 改为多行 JSON + Bash 单引号包裹，去掉 \\n/\\\" 展示，保持可复制执行 --- src/dashboard.ts, work.md
+2026-01-04 17:18:01 --- 修复 Admin 时间渲染崩溃（v.split is not a function）--- fmtIso 兼容 Date/非字符串并统一输出字符串，renderWhenUtc 入参放宽以匹配运行时类型 --- 修改了 src/admin.ts work.md

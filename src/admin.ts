@@ -65,13 +65,25 @@ function requireSession(req: Request, res: Response, cfg: AdminConfig) {
   return s;
 }
 
-function fmtIso(s: string | null | undefined) {
-  if (!s) return "Never";
-  return s.length >= 19 ? s.slice(0, 19).replace("T", " ") : s;
+function fmtIso(s: unknown): string {
+  if (s == null || s === "") return "Never";
+
+  // DB/pg 可能返回 Date（例如 timestamptz），此处统一归一化为 ISO 文本，避免下游 split 崩溃。
+  if (s instanceof Date) {
+    const iso = s.toISOString(); // e.g. 2026-01-04T08:19:49.123Z
+    return iso.slice(0, 19).replace("T", " ");
+  }
+
+  if (typeof s === "string") {
+    return s.length >= 19 ? s.slice(0, 19).replace("T", " ") : s;
+  }
+
+  // 兜底：尽量转成字符串，保证 renderWhenUtc 可安全 split。
+  return String(s);
 }
 
 // Admin：UTC 时间两行展示（保持与服务端统计/日志口径一致）
-function renderWhenUtc(s: string | null | undefined) {
+function renderWhenUtc(s: unknown) {
   const v = fmtIso(s);
   if (v === "Never") {
     return `<div class="when"><div class="when-primary muted">Never</div><div class="when-sub muted">—</div></div>`;
@@ -247,25 +259,25 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
     const db = deps.db;
 
     // 账号/Key 列表（最小可用：只做展示与禁用/吊销）
-    let accounts: Array<{ id: string; email: string; created_at: string; disabled_at: string | null; active_keys: number }> = [];
+    let accounts: Array<{ id: string; email: string; created_at: string | Date; disabled_at: string | null; active_keys: number }> = [];
     let keys: Array<{
       id: string;
       prefix: string;
       name: string;
-      created_at: string;
-      last_used_at: string | null;
+      created_at: string | Date;
+      last_used_at: string | Date | null;
       revoked_at: string | null;
       account_email: string;
       account_id: string;
     }> = [];
 
     if (db) {
-      const a = await db.query<{ id: string; email: string; created_at: string; disabled_at: string | null; active_keys: string }>(
+      const a = await db.query<{ id: string; email: string; created_at: string | Date; disabled_at: string | null; active_keys: string }>(
         `
-SELECT
-  a.id,
-  a.email,
-  a.created_at,
+	SELECT
+	  a.id,
+	  a.email,
+	  a.created_at,
   a.disabled_at,
   (SELECT COUNT(*)::text FROM api_keys k WHERE k.account_id=a.id AND k.revoked_at IS NULL) AS active_keys
 FROM accounts a
@@ -279,8 +291,8 @@ LIMIT 50
         id: string;
         prefix: string;
         name: string;
-        created_at: string;
-        last_used_at: string | null;
+        created_at: string | Date;
+        last_used_at: string | Date | null;
         revoked_at: string | null;
         account_email: string;
         account_id: string;
