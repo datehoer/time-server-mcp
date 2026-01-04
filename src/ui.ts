@@ -239,12 +239,13 @@ export function iconCopySvg() {
 </svg>`;
 }
 
-export function escapeAttr(s: string) {
+export function escapeAttr(input: unknown) {
   // Keep it safe for inclusion inside a double-quoted attribute.
-  return escapeHtml(s).replaceAll("\n", "&#10;").replaceAll("\r", "&#13;");
+  return escapeHtml(input).replaceAll("\n", "&#10;").replaceAll("\r", "&#13;");
 }
 
-export function escapeHtml(s: string) {
+export function escapeHtml(input: unknown) {
+  const s = input === null || input === undefined ? "" : String(input);
   return s
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
