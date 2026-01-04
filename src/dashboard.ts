@@ -610,7 +610,7 @@ LIMIT 20
               const cont = ' \\\\';
               function bashSingleQuote(s){
                 // Bash 单引号安全包裹：遇到 ' 用 '"'"' 打断再拼接
-                return "'" + String(s).replaceAll("'", "'\"'\"'") + "'";
+                return "'" + String(s).replaceAll("'", "'\\"'\\"'") + "'";
               }
               if(elHealth) elHealth.textContent = 'curl -sS -H "Authorization: Bearer YOUR_API_KEY" "' + healthUrl + '"';
               if(elInit){
