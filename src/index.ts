@@ -539,31 +539,35 @@ if (adminUser && adminPass && adminCookieSecret) {
       password: adminPass,
       cookieSecret: adminCookieSecret,
       cookieSecure: (process.env.ADMIN_COOKIE_SECURE ?? "1") !== "0",
-      sessionTtlSeconds: Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 7 * 24 * 3600),
+      sessionTtlSeconds: Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 3 * 3600),
     },
-    () => ({
-      ok: true,
-      uptime_s: Math.floor(process.uptime()),
-      transports: Object.keys(transports).length,
-      limits: { rate_limit_per_ip_per_minute: rateLimitPerMinute, sse_max_conns_per_ip: sseMaxConnsPerIp },
-      redis: Boolean(redis),
-      db: Boolean(db),
-      quota: {
-        timezone: "UTC",
-        counts: "tools/call",
-        default_free_daily_request_limit: cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
-      },
-      db_stats: adminDbSnapshot,
-      auth: {
-        mode: authMode,
-        env_bearer_enabled: envAuthEnabled && bearerTokens.length > 0,
-        env_bearer_token_count: bearerTokens.length,
-        env_bearer_tokens: bearerTokenIds.map((id) => ({
-          id,
-          last_used_iso: bearerTokenLastUsedMsById.has(id) ? new Date(bearerTokenLastUsedMsById.get(id)!).toISOString() : null,
-        })),
-      },
-    }),
+    {
+      db,
+      redis,
+      getStats: () => ({
+        ok: true,
+        uptime_s: Math.floor(process.uptime()),
+        transports: Object.keys(transports).length,
+        limits: { rate_limit_per_ip_per_minute: rateLimitPerMinute, sse_max_conns_per_ip: sseMaxConnsPerIp },
+        redis: Boolean(redis),
+        db: Boolean(db),
+        quota: {
+          timezone: "UTC",
+          counts: "tools/call",
+          default_free_daily_request_limit: cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
+        },
+        db_stats: adminDbSnapshot,
+        auth: {
+          mode: authMode,
+          env_bearer_enabled: envAuthEnabled && bearerTokens.length > 0,
+          env_bearer_token_count: bearerTokens.length,
+          env_bearer_tokens: bearerTokenIds.map((id) => ({
+            id,
+            last_used_iso: bearerTokenLastUsedMsById.has(id) ? new Date(bearerTokenLastUsedMsById.get(id)!).toISOString() : null,
+          })),
+        },
+      }),
+    },
   );
 } else {
   console.warn("Admin dashboard disabled: set ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_COOKIE_SECRET to enable /admin.");
@@ -591,6 +595,16 @@ if (dbAuthEnabled && db && redis) {
     cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
     ttlSeconds: cfg.AUTH_SESSION_TTL_SECONDS,
     cookieSecure: cfg.AUTH_COOKIE_SECURE,
+    defaultFreeDailyRequestLimit: cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
+    policyCacheSeconds: cfg.POLICY_CACHE_SECONDS,
+    getServerStats: () => ({
+      uptime_s: Math.floor(process.uptime()),
+      transports: Object.keys(transports).length,
+      redis: Boolean(redis),
+      db: Boolean(db),
+      auth_mode: authMode,
+      limits: { rate_limit_per_ip_per_minute: rateLimitPerMinute, sse_max_conns_per_ip: sseMaxConnsPerIp },
+    }),
   });
 } else {
   console.warn("Account/API key management disabled: set DATABASE_URL, REDIS_URL and AUTH_MODE=db to enable /auth and /me.");

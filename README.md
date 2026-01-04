@@ -44,7 +44,7 @@ pnpm start
 - `DEFAULT_FREE_DAILY_REQUEST_LIMIT`：免费默认额度（默认 `200`，按 UTC 自然日；仅 `tools/call` 计数）
 - `POLICY_CACHE_SECONDS`：套餐/用户组策略缓存秒数（默认 `60`）
 - `AUTH_SESSION_COOKIE_NAME`：登录态 Cookie 名（默认 `sid`）
-- `AUTH_SESSION_TTL_SECONDS`：登录态有效期（默认 7 天）
+- `AUTH_SESSION_TTL_SECONDS`：登录态有效期（默认 3 小时）
 - `AUTH_COOKIE_SECURE`：是否设置 `Secure` Cookie（默认 `1`；HTTPS 站点建议保持开启）
 - `REQUEST_LOG_RETENTION_DAYS`：请求明细留存天数（默认 `7`；仅记录 `tools/call`）
 - `API_KEY_ENCRYPTION_SECRET`：方案B（可随时复制明文 API Key）所需，32 bytes base64（AES-256-GCM）
@@ -58,7 +58,7 @@ pnpm start
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`：Admin 固定账号密码
 - `ADMIN_COOKIE_SECRET`：Cookie 签名密钥
 - `ADMIN_COOKIE_SECURE`：是否设置 `Secure` Cookie（默认 `1`，HTTPS 站点建议保持开启）
-- `ADMIN_SESSION_TTL_SECONDS`：登录态有效期（默认 7 天）
+- `ADMIN_SESSION_TTL_SECONDS`：登录态有效期（默认 3 小时）
 
 > 监听地址默认 `127.0.0.1`，可通过 `HOST` 覆盖（Docker 部署一般用 `0.0.0.0`）。
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const Bool01 = z.preprocess((v) => (v === undefined ? "1" : v), z.enum(["0", "1"])).transform((v) => v === "1");
+const ReservedCookieNames = new Set(["admin_session", "admin_captcha"]);
 
 export const AppConfigSchema = z.object({
   // 基础依赖
@@ -18,8 +19,13 @@ export const AppConfigSchema = z.object({
   POLICY_CACHE_SECONDS: z.coerce.number().int().min(1).default(60),
 
   // 登录会话（用于 /me/* 管理 API Key）
-  AUTH_SESSION_COOKIE_NAME: z.string().default("sid"),
-  AUTH_SESSION_TTL_SECONDS: z.coerce.number().int().min(60).default(7 * 24 * 3600),
+  AUTH_SESSION_COOKIE_NAME: z
+    .string()
+    .default("sid")
+    .refine((name) => !ReservedCookieNames.has(name), {
+      message: "AUTH_SESSION_COOKIE_NAME 不能使用保留名：admin_session/admin_captcha（避免与 /admin 登录态冲突）",
+    }),
+  AUTH_SESSION_TTL_SECONDS: z.coerce.number().int().min(60).default(3 * 3600),
   AUTH_COOKIE_SECURE: Bool01,
 
   // 方案B：用于加密存储 API Key 明文（AES-256-GCM，32 bytes base64）
