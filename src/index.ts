@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import cookieParser from "cookie-parser";
 import { createHash, randomUUID } from "node:crypto";
 import { DateTime, DurationLikeObject } from "luxon";
 import { z } from "zod";
@@ -8,6 +9,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { getClientIp, safeEqual } from "./httpUtil.js";
+import { loadConfig } from "./config.js";
+import { createDb, type Db } from "./db.js";
 import {
   createFixedWindowPerMinuteLimiter,
   createInMemoryCounterStore,
@@ -16,6 +19,13 @@ import {
   createRedisSseLimiter,
 } from "./limits.js";
 import { registerAdminRoutes } from "./admin.js";
+import { registerAuthRoutes } from "./auth.js";
+import { registerMeRoutes } from "./me.js";
+import { requireApiKey } from "./mcpAuth.js";
+import { incrDailyIfBelow, incrDailyPairIfBelow, secondsUntilNextUtcDay, utcDayKey } from "./mcpQuota.js";
+import { getGlobalDailyLimitCached, getToolDailyLimitCached } from "./quota.js";
+import { createRequestLogBuffer } from "./requestLog.js";
+import { createApiKeyLastUsedTracker } from "./lastUsed.js";
 
 /* -----------------------------
  * Helpers
@@ -309,21 +319,117 @@ server.tool(
  * HTTP Server (Streamable HTTP + SSE)
  * ----------------------------- */
 
+const cfg = loadConfig(process.env);
+
 const app = express();
 app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS ?? 1));
+app.use(cookieParser());
 
 const MCP_BODY_LIMIT = process.env.MCP_BODY_LIMIT ?? "512kb";
 app.use("/mcp", express.json({ limit: MCP_BODY_LIMIT, type: ["application/json", "application/*+json"] }));
 app.use("/admin", express.urlencoded({ extended: false, limit: "16kb" }));
 app.use("/admin", express.json({ limit: "16kb" }));
+app.use("/auth", express.json({ limit: "16kb" }));
+app.use("/me", express.json({ limit: "16kb" }));
 
 // sessionId -> transport
 const transports: Record<string, StreamableHTTPServerTransport> = {};
 
-const redisUrl = process.env.REDIS_URL;
+const redisUrl = cfg.REDIS_URL;
 const redis = redisUrl ? createClient({ url: redisUrl }) : null;
 redis?.on("error", (err) => console.error("Redis error:", err));
 if (redis) await redis.connect();
+
+const db: Db | null = cfg.DATABASE_URL ? createDb(cfg.DATABASE_URL) : null;
+
+// AUTH_MODE 默认：配置了 DATABASE_URL 则走 db；否则走 env（兼容旧 MCP_BEARER_TOKENS）
+const authMode = cfg.AUTH_MODE ?? (db ? "db" : "env");
+const envAuthEnabled = authMode === "env" || authMode === "both";
+const dbAuthEnabled = authMode === "db" || authMode === "both";
+
+if (dbAuthEnabled && !db) {
+  throw new Error("AUTH_MODE=db|both requires DATABASE_URL (PostgreSQL).");
+}
+if (dbAuthEnabled && !redis) {
+  throw new Error("AUTH_MODE=db|both requires REDIS_URL (Redis) for session + quota.");
+}
+
+// /admin 需要同步返回 stats；这里用后台定时刷新 DB 统计快照
+let adminDbSnapshot: any = null;
+if (db) {
+  const refresh = async () => {
+    try {
+      const now = new Date();
+      const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+      const dayEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+
+      const accounts = await db.query<{ n: string }>("SELECT COUNT(*)::text AS n FROM accounts");
+      const activeKeys = await db.query<{ n: string }>("SELECT COUNT(*)::text AS n FROM api_keys WHERE revoked_at IS NULL");
+      const todayTotals = await db.query<{ allowed: string; denied: string }>(
+        `
+SELECT
+  SUM(CASE WHEN allowed THEN 1 ELSE 0 END)::text AS allowed,
+  SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END)::text AS denied
+FROM request_logs
+WHERE ts >= $1 AND ts < $2
+`,
+        [dayStart.toISOString(), dayEnd.toISOString()],
+      );
+
+      const topKeys = await db.query<{ api_key_id: string; allowed: string; denied: string }>(
+        `
+SELECT
+  api_key_id,
+  SUM(CASE WHEN allowed THEN 1 ELSE 0 END)::text AS allowed,
+  SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END)::text AS denied
+FROM request_logs
+WHERE ts >= $1 AND ts < $2 AND api_key_id IS NOT NULL
+GROUP BY api_key_id
+ORDER BY (SUM(CASE WHEN allowed THEN 1 ELSE 0 END)) DESC
+LIMIT 10
+`,
+        [dayStart.toISOString(), dayEnd.toISOString()],
+      );
+
+      const keyMeta =
+        topKeys.rows.length > 0
+          ? await db.query<{ id: string; prefix: string; name: string; account_id: string; last_used_at: string | null }>(
+              `SELECT id, prefix, name, account_id, last_used_at FROM api_keys WHERE id = ANY($1::uuid[])`,
+              [topKeys.rows.map((r) => r.api_key_id)],
+            )
+          : { rows: [] as any[] };
+
+      const metaById = new Map<string, any>(keyMeta.rows.map((r) => [r.id, r]));
+      adminDbSnapshot = {
+        utc_day: utcDayKey(now),
+        accounts: Number(accounts.rows[0]?.n ?? "0"),
+        active_api_keys: Number(activeKeys.rows[0]?.n ?? "0"),
+        tool_calls_today: {
+          allowed: Number(todayTotals.rows[0]?.allowed ?? "0"),
+          denied: Number(todayTotals.rows[0]?.denied ?? "0"),
+        },
+        top_api_keys_today: topKeys.rows.map((r) => {
+          const meta = metaById.get(r.api_key_id);
+          return {
+            api_key_id: r.api_key_id,
+            prefix: meta?.prefix ?? "",
+            name: meta?.name ?? "",
+            account_id: meta?.account_id ?? "",
+            last_used_at: meta?.last_used_at ?? null,
+            allowed: Number(r.allowed ?? "0"),
+            denied: Number(r.denied ?? "0"),
+          };
+        }),
+      };
+    } catch {
+      // DB 未初始化/不可用时不影响服务启动
+      adminDbSnapshot = null;
+    }
+  };
+  refresh().catch(() => {});
+  const timer = setInterval(() => refresh().catch(() => {}), 15_000);
+  timer.unref?.();
+}
 
 const rateLimitPerMinute = Number(process.env.RATE_LIMIT_PER_IP_PER_MINUTE ?? 120);
 const sseMaxConnsPerIp = Number(process.env.SSE_MAX_CONNS_PER_IP ?? 5);
@@ -347,12 +453,14 @@ const sseLimiter = redis
     })
   : createInMemorySseLimiter({ maxConnsPerIp: sseMaxConnsPerIp, maxAgeMs: sseMaxAgeMs });
 
-const bearerTokens = (process.env.MCP_BEARER_TOKENS ?? process.env.MCP_BEARER_TOKEN ?? "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-if (bearerTokens.length === 0) {
-  console.warn("Bearer auth disabled: set MCP_BEARER_TOKENS (or MCP_BEARER_TOKEN) to protect /mcp.");
+const bearerTokens = envAuthEnabled
+  ? (process.env.MCP_BEARER_TOKENS ?? process.env.MCP_BEARER_TOKEN ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  : [];
+if (envAuthEnabled && bearerTokens.length === 0) {
+  console.warn("Env Bearer auth enabled but no tokens set: set MCP_BEARER_TOKENS (or MCP_BEARER_TOKEN).");
 }
 
 function bearerTokenId(token: string) {
@@ -362,8 +470,11 @@ function bearerTokenId(token: string) {
 const bearerTokenIds = bearerTokens.map(bearerTokenId);
 const bearerTokenLastUsedMsById = new Map<string, number>();
 
-function requireBearer(req: Request, res: Response) {
-  if (bearerTokens.length === 0) return true;
+function requireBearerEnv(req: Request, res: Response) {
+  if (bearerTokens.length === 0) {
+    res.status(500).send("Server auth misconfigured");
+    return false;
+  }
   const auth = req.header("authorization") ?? "";
   const prefix = "Bearer ";
   if (!auth.startsWith(prefix)) {
@@ -392,12 +503,22 @@ async function enforceRateLimit(req: Request, res: Response) {
   return false;
 }
 
+const ToolsCallSchema = z
+  .object({
+    method: z.literal("tools/call"),
+    params: z.object({ name: z.string() }).passthrough(),
+    id: z.any().optional(),
+  })
+  .passthrough();
+
 app.get("/health", (req: Request, res: Response) => {
   res.status(200).json({
     ok: true,
     uptime_s: Math.floor(process.uptime()),
     transports: Object.keys(transports).length,
     redis: Boolean(redis),
+    db: Boolean(db),
+    auth: { mode: authMode, env_enabled: envAuthEnabled, db_enabled: dbAuthEnabled },
   });
 });
 
@@ -420,10 +541,18 @@ if (adminUser && adminPass && adminCookieSecret) {
       transports: Object.keys(transports).length,
       limits: { rate_limit_per_ip_per_minute: rateLimitPerMinute, sse_max_conns_per_ip: sseMaxConnsPerIp },
       redis: Boolean(redis),
+      db: Boolean(db),
+      quota: {
+        timezone: "UTC",
+        counts: "tools/call",
+        default_free_daily_request_limit: cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
+      },
+      db_stats: adminDbSnapshot,
       auth: {
-        bearer_enabled: bearerTokens.length > 0,
-        bearer_token_count: bearerTokens.length,
-        bearer_tokens: bearerTokenIds.map((id) => ({
+        mode: authMode,
+        env_bearer_enabled: envAuthEnabled && bearerTokens.length > 0,
+        env_bearer_token_count: bearerTokens.length,
+        env_bearer_tokens: bearerTokenIds.map((id) => ({
           id,
           last_used_iso: bearerTokenLastUsedMsById.has(id) ? new Date(bearerTokenLastUsedMsById.get(id)!).toISOString() : null,
         })),
@@ -434,16 +563,160 @@ if (adminUser && adminPass && adminCookieSecret) {
   console.warn("Admin dashboard disabled: set ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_COOKIE_SECRET to enable /admin.");
 }
 
+// 账号体系（/auth + /me）只在 dbAuth 模式下启用
+if (dbAuthEnabled && db && redis) {
+  registerAuthRoutes(app, {
+    db,
+    redis,
+    cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
+    ttlSeconds: cfg.AUTH_SESSION_TTL_SECONDS,
+    cookieSecure: cfg.AUTH_COOKIE_SECURE,
+  });
+  registerMeRoutes(app, {
+    db,
+    redis,
+    cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
+    maxKeysPerAccount: 10,
+  });
+} else {
+  console.warn("Account/API key management disabled: set DATABASE_URL, REDIS_URL and AUTH_MODE=db to enable /auth and /me.");
+}
+
+// 请求日志（仅 tools/call）。若未启用 DB，则不记录。
+const requestLog =
+  db && redis
+    ? createRequestLogBuffer({
+        db,
+        maxBuffer: cfg.REQUEST_LOG_MAX_BUFFER,
+        flushEveryMs: cfg.REQUEST_LOG_FLUSH_EVERY_MS,
+        retentionDays: cfg.REQUEST_LOG_RETENTION_DAYS,
+      })
+    : null;
+
+const apiKeyLastUsed = db ? createApiKeyLastUsedTracker({ db, flushEveryMs: 30_000 }) : null;
+
 // POST: client requests (including initialize)
 app.post("/mcp", async (req: Request, res: Response) => {
   if (!(await enforceRateLimit(req, res))) return;
-  if (!requireBearer(req, res)) return;
+  const toolCall = ToolsCallSchema.safeParse(req.body);
+  const toolName = toolCall.success ? toolCall.data.params.name : null;
+
+  let accountId: string | null = null;
+  let apiKeyId: string | null = null;
+
+  // 1) DB API Key（推荐）
+  if (dbAuthEnabled && db && redis) {
+    const auth = await requireApiKey(req, res, { db, redis });
+    if (!auth) {
+      if (toolName) {
+        requestLog?.push({
+          ts: new Date(),
+          accountId: null,
+          apiKeyId: null,
+          tool: toolName,
+          allowed: false,
+          httpStatus: 401,
+          ip: getClientIp(req),
+        });
+      }
+      return;
+    }
+    accountId = auth.accountId;
+    apiKeyId = auth.apiKeyId;
+    apiKeyLastUsed?.touch(apiKeyId, Date.now());
+  } else if (envAuthEnabled) {
+    // 2) 兼容旧的环境变量 token（迁移期）
+    if (!requireBearerEnv(req, res)) return;
+  } else {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  // 配额：仅 tools/call 计数，按 UTC 日切
+  if (toolName && dbAuthEnabled && db && redis) {
+    const day = utcDayKey();
+    const ttlSeconds = secondsUntilNextUtcDay();
+
+    const globalLimit = await getGlobalDailyLimitCached({
+      redis,
+      db,
+      accountId: accountId!,
+      metric: "requests",
+      defaultFree: cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
+      cacheSeconds: cfg.POLICY_CACHE_SECONDS,
+    });
+
+    const toolLimit = await getToolDailyLimitCached({
+      redis,
+      db,
+      accountId: accountId!,
+      metric: "requests",
+      tool: toolName,
+      cacheSeconds: cfg.POLICY_CACHE_SECONDS,
+    });
+
+    const globalKey = `quota:acct:${accountId}:${day}:requests:all`;
+    const toolKey = `quota:acct:${accountId}:${day}:requests:tool:${toolName}`;
+
+    let allowed = true;
+    let usedAccount = 0;
+    let usedTool: number | null = null;
+
+    if (toolLimit === null) {
+      const q1 = await incrDailyIfBelow({ redis, key: globalKey, limit: globalLimit, ttlSeconds });
+      allowed = q1.allowed;
+      usedAccount = q1.used;
+    } else {
+      const q2 = await incrDailyPairIfBelow({ redis, key1: globalKey, limit1: globalLimit, key2: toolKey, limit2: toolLimit, ttlSeconds });
+      allowed = q2.allowed;
+      usedAccount = q2.used1;
+      usedTool = q2.used2;
+    }
+
+    if (!allowed) {
+      const id = toolCall.success ? toolCall.data.id ?? null : null;
+      res.status(429).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32029,
+          message: "Daily quota exceeded",
+          data:
+            toolLimit === null
+              ? { timezone: "UTC", day, scope: "account", limit: globalLimit, used: usedAccount }
+              : { timezone: "UTC", day, scope: "account+tool", account_limit: globalLimit, tool_limit: toolLimit, used_account: usedAccount, used_tool: usedTool },
+        },
+        id,
+      });
+      requestLog?.push({
+        ts: new Date(),
+        accountId,
+        apiKeyId,
+        tool: toolName,
+        allowed: false,
+        httpStatus: 429,
+        ip: getClientIp(req),
+      });
+      return;
+    }
+  }
+
   try {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     // 1) 已有 session：复用 transport
     if (sessionId && transports[sessionId]) {
       await transports[sessionId].handleRequest(req, res, req.body);
+      if (toolName) {
+        requestLog?.push({
+          ts: new Date(),
+          accountId,
+          apiKeyId,
+          tool: toolName,
+          allowed: true,
+          httpStatus: res.statusCode || 200,
+          ip: getClientIp(req),
+        });
+      }
       return;
     }
 
@@ -460,6 +733,17 @@ app.post("/mcp", async (req: Request, res: Response) => {
 
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
+      if (toolName) {
+        requestLog?.push({
+          ts: new Date(),
+          accountId,
+          apiKeyId,
+          tool: toolName,
+          allowed: true,
+          httpStatus: res.statusCode || 200,
+          ip: getClientIp(req),
+        });
+      }
       return;
     }
 
@@ -478,13 +762,33 @@ app.post("/mcp", async (req: Request, res: Response) => {
         id: null,
       });
     }
+    if (toolName) {
+      requestLog?.push({
+        ts: new Date(),
+        accountId,
+        apiKeyId,
+        tool: toolName,
+        allowed: false,
+        httpStatus: 500,
+        ip: getClientIp(req),
+      });
+    }
   }
 });
 
 // GET: establish SSE stream for server-to-client messages
 app.get("/mcp", async (req: Request, res: Response) => {
   if (!(await enforceRateLimit(req, res))) return;
-  if (!requireBearer(req, res)) return;
+  if (dbAuthEnabled && db && redis) {
+    const auth = await requireApiKey(req, res, { db, redis });
+    if (!auth) return;
+    apiKeyLastUsed?.touch(auth.apiKeyId, Date.now());
+  } else if (envAuthEnabled) {
+    if (!requireBearerEnv(req, res)) return;
+  } else {
+    res.status(401).send("Unauthorized");
+    return;
+  }
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   if (!sessionId || !transports[sessionId]) {
     res.status(400).send("Invalid or missing session ID");
@@ -529,7 +833,16 @@ app.get("/mcp", async (req: Request, res: Response) => {
 // DELETE: terminate session
 app.delete("/mcp", async (req: Request, res: Response) => {
   if (!(await enforceRateLimit(req, res))) return;
-  if (!requireBearer(req, res)) return;
+  if (dbAuthEnabled && db && redis) {
+    const auth = await requireApiKey(req, res, { db, redis });
+    if (!auth) return;
+    apiKeyLastUsed?.touch(auth.apiKeyId, Date.now());
+  } else if (envAuthEnabled) {
+    if (!requireBearerEnv(req, res)) return;
+  } else {
+    res.status(401).send("Unauthorized");
+    return;
+  }
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   if (!sessionId || !transports[sessionId]) {
     res.status(400).send("Invalid or missing session ID");
@@ -562,6 +875,9 @@ app.listen(PORT, LISTEN_HOST, (err?: any) => {
 async function shutdown(signal: string) {
   console.log(`Shutting down (${signal})...`);
   await server.close();
+  await requestLog?.close();
+  await apiKeyLastUsed?.close();
+  await db?.close();
   await redis?.quit();
   process.exit(0);
 }

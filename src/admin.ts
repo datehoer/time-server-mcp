@@ -407,44 +407,99 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, getStats: () => 
     const uptimeSeconds = Number((stats as any)?.uptime_s ?? 0);
     const transportsCount = Number((stats as any)?.transports ?? 0);
     const redisEnabled = Boolean((stats as any)?.redis);
+    const dbEnabled = Boolean((stats as any)?.db);
+    const quota = (stats as any)?.quota as { timezone?: string; counts?: string; default_free_daily_request_limit?: number } | undefined;
+    const dbStats = (stats as any)?.db_stats as
+      | {
+          utc_day?: string;
+          accounts?: number;
+          active_api_keys?: number;
+          tool_calls_today?: { allowed?: number; denied?: number };
+          top_api_keys_today?: Array<{
+            api_key_id?: string;
+            prefix?: string;
+            name?: string;
+            account_id?: string;
+            last_used_at?: string | null;
+            allowed?: number;
+            denied?: number;
+          }>;
+        }
+      | undefined;
     const limits = (stats as any)?.limits as { rate_limit_per_ip_per_minute?: number; sse_max_conns_per_ip?: number } | undefined;
     const rateLimit = Number(limits?.rate_limit_per_ip_per_minute ?? 0);
     const sseMax = Number(limits?.sse_max_conns_per_ip ?? 0);
+
+    const freeDailyLimit = Number(quota?.default_free_daily_request_limit ?? 0);
+    const todayAllowed = Number(dbStats?.tool_calls_today?.allowed ?? 0);
+    const todayDenied = Number(dbStats?.tool_calls_today?.denied ?? 0);
+    const utcDay = String(dbStats?.utc_day ?? "");
+    const accountsCount = Number(dbStats?.accounts ?? 0);
+    const activeKeysCount = Number(dbStats?.active_api_keys ?? 0);
+
+    const topKeys = (dbStats?.top_api_keys_today ?? []).slice(0, 10);
+    const topKeysRows =
+      topKeys.length > 0
+        ? topKeys
+            .map((k, i) => {
+              return `
+                <tr>
+                  <td>${i + 1}</td>
+                  <td class="mono">${escapeHtml(k.prefix ?? "")}</td>
+                  <td>${escapeHtml(k.name ?? "")}</td>
+                  <td class="mono">${escapeHtml(String(k.account_id ?? "").slice(0, 12))}</td>
+                  <td>${Number(k.allowed ?? 0)}</td>
+                  <td>${Number(k.denied ?? 0)}</td>
+                </tr>
+              `;
+            })
+            .join("")
+        : `<tr><td colspan="6" class="muted">No tool calls logged today (UTC).</td></tr>`;
 
     const bearerTokenSource = process.env.MCP_BEARER_TOKENS ?? process.env.MCP_BEARER_TOKEN ?? "";
     const configuredTokens = bearerTokenSource
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    const authEnabled = configuredTokens.length > 0;
+    const authMode = String(((stats as any)?.auth as any)?.mode ?? "env");
+    const authEnabled = authMode === "db" || authMode === "both" || configuredTokens.length > 0;
 
-    const bearerUsage = (((stats as any)?.auth as any)?.bearer_tokens as Array<{ id?: string; last_used_iso?: string }> | undefined) ?? [];
+    const bearerUsage =
+      ((((stats as any)?.auth as any)?.env_bearer_tokens as Array<{ id?: string; last_used_iso?: string }> | undefined) ?? []);
     const lastUsedIsoById = new Map<string, string>();
     for (const t of bearerUsage) {
       if (t?.id && typeof t.last_used_iso === "string") lastUsedIsoById.set(t.id, t.last_used_iso);
     }
 
     const apiKeysRows =
-      configuredTokens.length > 0
-        ? configuredTokens
-            .map((t, i) => {
-              const id = tokenId(t);
-              const lastUsedIso = lastUsedIsoById.get(id) ?? "";
-              return `
-                <tr>
-                  <td>Token ${i + 1}</td>
-                  <td class="mono">${escapeHtml(maskToken(t))}</td>
-                  <td class="mono">—</td>
-                  <td class="muted">${escapeHtml(formatIsoDay(lastUsedIso))}</td>
-                </tr>
-              `;
-            })
-            .join("")
-        : `
+      authMode === "db" || authMode === "both"
+        ? `
             <tr>
-              <td colspan="4" class="muted">No API keys configured. Set <span class="mono">MCP_BEARER_TOKENS</span> to enable Bearer auth.</td>
+              <td colspan="4" class="muted">
+                当前鉴权模式为 <span class="mono">${escapeHtml(authMode)}</span>：API Key 按账号管理，请通过 <span class="mono">/auth</span> 注册登录后在 <span class="mono">/me/api-keys</span> 创建/吊销（此处不展示明文密钥）。
+              </td>
             </tr>
-          `;
+          `
+        : configuredTokens.length > 0
+          ? configuredTokens
+              .map((t, i) => {
+                const id = tokenId(t);
+                const lastUsedIso = lastUsedIsoById.get(id) ?? "";
+                return `
+                  <tr>
+                    <td>Token ${i + 1}</td>
+                    <td class="mono">${escapeHtml(maskToken(t))}</td>
+                    <td class="mono">—</td>
+                    <td class="muted">${escapeHtml(formatIsoDay(lastUsedIso))}</td>
+                  </tr>
+                `;
+              })
+              .join("")
+          : `
+              <tr>
+                <td colspan="4" class="muted">No API keys configured. Set <span class="mono">MCP_BEARER_TOKENS</span> to enable Env Bearer auth.</td>
+              </tr>
+            `;
 
     const overviewJson = JSON.stringify(
       {
@@ -640,6 +695,43 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, getStats: () => 
               <div class="value">${rateLimit ? `${rateLimit}/min` : "—"}</div>
               <div class="sub">Per IP on /mcp</div>
             </article>
+            <article class="card card-pad">
+              <div class="kicker">Database</div>
+              <div class="value">${dbEnabled ? "On" : "Off"}</div>
+              <div class="sub">${dbEnabled ? `${accountsCount} accounts · ${activeKeysCount} active keys` : "DB auth disabled"}</div>
+            </article>
+            <article class="card card-pad">
+              <div class="kicker">Quota (UTC)</div>
+              <div class="value">${freeDailyLimit ? `${freeDailyLimit}/day` : "—"}</div>
+              <div class="sub">${utcDay ? `${utcDay} · allowed ${todayAllowed} · denied ${todayDenied}` : "tools/call only"}</div>
+            </article>
+          </div>
+
+          <div class="card" style="margin-top:18px">
+            <div class="card-pad">
+              <div class="section-head">
+                <div>
+                  <h2 class="section-title">Usage (UTC today)</h2>
+                  <div class="section-desc">仅统计并记录 <span class="mono">tools/call</span>（按 UTC 自然日）。</div>
+                </div>
+                <span class="badge ${dbEnabled ? "badge-ok" : ""}">${dbEnabled ? "DB Logs On" : "DB Logs Off"}</span>
+              </div>
+            </div>
+            <table class="table" aria-label="Top API keys today">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Key Prefix</th>
+                  <th>Name</th>
+                  <th>Account</th>
+                  <th>Allowed</th>
+                  <th>Denied</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${topKeysRows}
+              </tbody>
+            </table>
           </div>
 
           <div class="card" style="margin-top:18px">
@@ -647,9 +739,9 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, getStats: () => 
               <div class="section-head">
                 <div>
                   <h2 class="section-title">API Keys</h2>
-                  <div class="section-desc">用于访问 <span class="mono">/mcp</span> 的 Bearer Token（仅展示掩码）。</div>
+                  <div class="section-desc">用于访问 <span class="mono">/mcp</span> 的 Bearer Token（<span class="mono">AUTH_MODE=db</span> 时通过 <span class="mono">/me/api-keys</span> 创建）。</div>
                 </div>
-                <button class="btn btn-primary" type="button" disabled title="Set MCP_BEARER_TOKENS to manage tokens">Create API Key</button>
+                <button class="btn btn-primary" type="button" disabled title="${escapeHtml(authMode === "db" || authMode === "both" ? "Use /me/api-keys to create per-account keys" : "Set MCP_BEARER_TOKENS to manage tokens")}">Create API Key</button>
               </div>
             </div>
             <table class="table" aria-label="API keys table">
@@ -674,7 +766,7 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, getStats: () => 
                   <h2 class="section-title">Connect</h2>
                   <div class="section-desc">复制地址或选择客户端模板快速接入。</div>
                 </div>
-                <span class="badge ${authEnabled ? "badge-ok" : ""}">${authEnabled ? "Bearer Enabled" : "Bearer Disabled"}</span>
+                <span class="badge ${authEnabled ? "badge-ok" : ""}">${authEnabled ? `Auth: ${escapeHtml(authMode)}` : "Auth Disabled"}</span>
               </div>
 
               <div style="display:grid;gap:12px;margin-top:14px">

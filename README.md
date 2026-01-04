@@ -27,12 +27,26 @@ pnpm start
 
 - `PORT`：监听端口（默认 `7545`）
 - `HOST`：监听地址（默认 `127.0.0.1`；Docker 部署建议 `0.0.0.0`）
-- `MCP_BEARER_TOKENS`：保护 `/mcp` 的 Bearer Token（逗号分隔多个）
+- `AUTH_MODE`：鉴权模式（`env` | `db` | `both`）
+  - `env`：使用 `MCP_BEARER_TOKENS`（兼容旧模式）
+  - `db`：使用 `DATABASE_URL` 中的账号/API Key（推荐）
+  - `both`：迁移期同时允许
+- `MCP_BEARER_TOKENS`：`AUTH_MODE=env|both` 时保护 `/mcp` 的 Bearer Token（逗号分隔多个）
+- `DATABASE_URL`：`AUTH_MODE=db|both` 时启用 Postgres（账号、API Key、套餐/用户组、请求日志）
 - `REDIS_URL`：Redis 连接串（用于按 IP 限流与 SSE 并发上限）
 - `MCP_BODY_LIMIT`：最大请求体（默认 `512kb`，仅对 `/mcp` 的 JSON 生效）
 - `RATE_LIMIT_PER_IP_PER_MINUTE`：按 IP 每分钟请求数（默认 `120`，对 `/mcp` 的 GET/POST/DELETE 生效）
 - `SSE_MAX_CONNS_PER_IP`：按 IP 最大 SSE 并发连接数（默认 `5`）
 - `TRUST_PROXY_HOPS`：反代层数（默认 `1`）
+
+`AUTH_MODE=db|both` 额外支持：
+
+- `DEFAULT_FREE_DAILY_REQUEST_LIMIT`：免费默认额度（默认 `200`，按 UTC 自然日；仅 `tools/call` 计数）
+- `POLICY_CACHE_SECONDS`：套餐/用户组策略缓存秒数（默认 `60`）
+- `AUTH_SESSION_COOKIE_NAME`：登录态 Cookie 名（默认 `sid`）
+- `AUTH_SESSION_TTL_SECONDS`：登录态有效期（默认 7 天）
+- `AUTH_COOKIE_SECURE`：是否设置 `Secure` Cookie（默认 `1`；HTTPS 站点建议保持开启）
+- `REQUEST_LOG_RETENTION_DAYS`：请求明细留存天数（默认 `7`；仅记录 `tools/call`）
 
 可选（开启 `/admin`）：
 
@@ -55,6 +69,28 @@ pnpm start
 - `DELETE /mcp`：终止会话（必须带 `mcp-session-id`）
 
 > 注意：当配置了 `MCP_BEARER_TOKENS` 时，`/mcp` 需要 `Authorization: Bearer <token>`。
+
+## 账号 / API Key（AUTH_MODE=db）
+
+1) 初始化数据库：执行 `sql/001_init.sql`
+
+2) 注册/登录：
+
+- `POST /auth/register`：`{ email, password }`
+- `POST /auth/login`：`{ email, password }`（成功后写入 Cookie）
+- `POST /auth/logout`
+
+3) 管理 API Key（需登录 Cookie）：
+
+- `GET /me/api-keys`
+- `POST /me/api-keys`：`{ name? }`（每账号最多 10 个，返回 `secret` 仅一次）
+- `DELETE /me/api-keys/:id`
+
+4) 配额说明：
+
+- 仅 `tools/call` 计数
+- 按 UTC 自然日
+- 默认免费额度 `200/天`（可通过套餐/用户组叠加提升）
 
 ## Docker Compose 部署
 
