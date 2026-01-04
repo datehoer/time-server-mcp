@@ -6,3 +6,4 @@
 2026-01-04T06:28:59Z --- 隐藏 Admin 入口 + 会话 3 小时过期（绝对过期）--- Dashboard 页面移除所有 /admin 链接；防止 AUTH_SESSION_COOKIE_NAME 与 admin cookie 冲突；Admin/Dashboard 会话默认 TTL 调整为 10800 秒，并同步文档与示例 --- 修改了 src/dashboard.ts src/config.ts src/index.ts .env.example README.md work.md
 2026-01-04T06:57:24Z --- 将 Admin 内容迁移到 Dashboard + Admin 改为后端管理（最小可用）--- Dashboard 增加 Overview/Usage/API Keys/Connect/API/Limits 多页签并新增 /dashboard/api/stats（严格按当前账号汇总）；Admin 改为账号禁用/启用与 Key 吊销；mcpAuth 增加账号禁用标记（Redis）避免缓存窗口 --- 修改了 src/index.ts src/admin.ts src/dashboard.ts src/mcpAuth.ts work.md
 2026-01-04T07:27:27Z --- 修复 Docker 运行时报错 s.replaceAll is not a function --- escapeHtml/escapeAttr 入参改为 unknown 并做 String() 兜底，避免非字符串导致崩溃；重建 dist --- 修改了 src/ui.ts work.md
+2026-01-04T07:47:26Z --- Dashboard API 页代码块自动换行/防溢出 --- 修复 grid 下 pre 撑破布局：为 API 区块加 api-grid 宽度约束（minmax(0,1fr)+min-width:0），并启用 pre-wrap+overflow-wrap:anywhere 实现视觉换行 --- 修改了 src/dashboard.ts src/ui.ts work.md

@@ -116,6 +116,11 @@ export function baseStyles() {
     .grid-4{grid-template-columns:repeat(1,minmax(0,1fr))}
     @media (min-width: 720px){.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}}
 
+    /* Dashboard「API」页：长命令/JSON 在 grid 下容易撑破布局，这里强制可收缩并启用视觉换行 */
+    .api-grid{display:grid;gap:12px;grid-template-columns:minmax(0,1fr)}
+    .api-grid > *{min-width:0}
+    .api-grid pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}
+
     .card{
       background:hsl(var(--card));
       border:1px solid hsl(var(--border));

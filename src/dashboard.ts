@@ -477,7 +477,7 @@ LIMIT 20
               </div>
             </div>
 
-            <div class="card-pad" style="padding-top:0;display:grid;gap:12px">
+            <div class="card-pad api-grid" style="padding-top:0">
               <div>
                 <div class="kicker" style="margin:6px 0 8px">Health</div>
                 <pre class="mono" id="curlHealth">loading…</pre>
