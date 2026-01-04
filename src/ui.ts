@@ -140,6 +140,23 @@ export function baseStyles() {
     .table th,.table td{padding:10px 12px;border-top:1px solid hsl(var(--border));font-size:13px;text-align:left;vertical-align:middle}
     .table th{color:hsl(var(--muted-foreground));font-size:11px;letter-spacing:0.06em;text-transform:uppercase}
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+
+    /* Admin 表格：时间两行展示（UTC），更易扫读 */
+    .when{display:flex;flex-direction:column;gap:2px;line-height:1.2}
+    .when-primary{font-weight:650}
+    .when-sub{font-size:12px;color:hsl(var(--muted-foreground))}
+
+    /* 表格行操作：更紧凑、更对齐 */
+    .row-actions{display:flex;align-items:center;justify-content:flex-start;gap:10px}
+    .btn-sm{height:30px;padding:0 10px;border-radius:10px;font-size:12px}
+
+    /* 更丰富的状态样式 */
+    .badge-muted{background:hsl(var(--muted) / 0.4);color:hsl(var(--muted-foreground))}
+    .badge-danger{border-color:hsl(0 84% 60% / 0.35);background:hsl(0 84% 60% / 0.10);color:hsl(0 72% 35%)}
+    .dot{width:7px;height:7px;border-radius:999px;background:currentColor;opacity:0.9}
+    .dot-ok{color:hsl(var(--primary))}
+    .dot-warn{color:hsl(32 90% 30%)}
+    .dot-danger{color:hsl(0 72% 35%)}
     .badge{
       display:inline-flex;align-items:center;gap:6px;
       height:22px;padding:0 8px;border-radius:999px;

@@ -70,6 +70,18 @@ function fmtIso(s: string | null | undefined) {
   return s.length >= 19 ? s.slice(0, 19).replace("T", " ") : s;
 }
 
+// Admin：UTC 时间两行展示（保持与服务端统计/日志口径一致）
+function renderWhenUtc(s: string | null | undefined) {
+  const v = fmtIso(s);
+  if (v === "Never") {
+    return `<div class="when"><div class="when-primary muted">Never</div><div class="when-sub muted">—</div></div>`;
+  }
+  const parts = v.split(" ");
+  const date = parts[0] ?? v;
+  const time = parts[1] ?? "";
+  return `<div class="when"><div class="when-primary mono">${escapeHtml(date)}</div><div class="when-sub mono">${escapeHtml(time)} UTC</div></div>`;
+}
+
 export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps) {
   app.get("/admin/login", (_req: Request, res: Response) => {
     const a = randomInt(1, 10);
@@ -376,16 +388,18 @@ LIMIT 50
                 db
                   ? accounts
                       .map((a) => {
-                        const status = a.disabled_at ? `<span class="badge">disabled</span>` : `<span class="badge badge-ok">active</span>`;
+                        const status = a.disabled_at
+                          ? `<span class="badge badge-muted"><span class="dot dot-warn" aria-hidden="true"></span>disabled</span>`
+                          : `<span class="badge badge-ok"><span class="dot dot-ok" aria-hidden="true"></span>active</span>`;
                         const action = a.disabled_at
-                          ? `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/enable" style="margin:0"><button class="btn" type="submit">Enable</button></form>`
-                          : `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/disable" style="margin:0"><button class="btn btn-danger" type="submit" onclick="return confirm('确定禁用该账号？')">Disable</button></form>`;
+                          ? `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/enable" style="margin:0"><button class="btn btn-sm" type="submit">Enable</button></form>`
+                          : `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/disable" style="margin:0"><button class="btn btn-sm btn-danger" type="submit" onclick="return confirm('确定禁用该账号？')">Disable</button></form>`;
                         return `<tr>
                           <td class="mono">${escapeHtml(a.email)}</td>
-                          <td class="mono">${escapeHtml(fmtIso(a.created_at))}</td>
+                          <td>${renderWhenUtc(a.created_at)}</td>
                           <td>${status}</td>
                           <td class="mono">${a.active_keys}</td>
-                          <td>${action}</td>
+                          <td><div class="row-actions">${action}</div></td>
                         </tr>`;
                       })
                       .join("")
@@ -421,18 +435,20 @@ LIMIT 50
                 db
                   ? keys
                       .map((k) => {
-                        const status = k.revoked_at ? `<span class="badge">revoked</span>` : `<span class="badge badge-ok">active</span>`;
+                        const status = k.revoked_at
+                          ? `<span class="badge badge-danger"><span class="dot dot-danger" aria-hidden="true"></span>revoked</span>`
+                          : `<span class="badge badge-ok"><span class="dot dot-ok" aria-hidden="true"></span>active</span>`;
                         const action = k.revoked_at
                           ? ""
-                          : `<form method="post" action="/admin/api-keys/${escapeHtml(k.id)}/revoke" style="margin:0"><button class="btn btn-danger" type="submit" onclick="return confirm('确定吊销该 Key？吊销后将立即失效。')">Revoke</button></form>`;
+                          : `<form method="post" action="/admin/api-keys/${escapeHtml(k.id)}/revoke" style="margin:0"><button class="btn btn-sm btn-danger" type="submit" onclick="return confirm('确定吊销该 Key？吊销后将立即失效。')">Revoke</button></form>`;
                         return `<tr>
                           <td class="mono">${escapeHtml(k.prefix)}</td>
                           <td>${escapeHtml(k.name)}</td>
                           <td class="mono">${escapeHtml(k.account_email)}</td>
-                          <td class="mono">${escapeHtml(fmtIso(k.created_at))}</td>
-                          <td class="mono">${escapeHtml(fmtIso(k.last_used_at))}</td>
+                          <td>${renderWhenUtc(k.created_at)}</td>
+                          <td>${renderWhenUtc(k.last_used_at)}</td>
                           <td>${status}</td>
-                          <td>${action}</td>
+                          <td><div class="row-actions">${action}</div></td>
                         </tr>`;
                       })
                       .join("")
@@ -478,4 +494,3 @@ function formatDuration(uptimeSeconds: number) {
   if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
 }
-
