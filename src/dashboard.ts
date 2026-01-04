@@ -607,18 +607,31 @@ LIMIT 20
               const elHealth = document.getElementById('curlHealth');
               const elInit = document.getElementById('curlInit');
               const elTool = document.getElementById('curlTool');
+              const cont = ' \\\\';
+              function bashSingleQuote(s){
+                // Bash 单引号安全包裹：遇到 ' 用 '"'"' 打断再拼接
+                return "'" + String(s).replaceAll("'", "'\"'\"'") + "'";
+              }
               if(elHealth) elHealth.textContent = 'curl -sS -H "Authorization: Bearer YOUR_API_KEY" "' + healthUrl + '"';
-              if(elInit) elInit.textContent =
-                'curl -sS -X POST "' + mcpUrl + '" \\\\\\n' +
-                '  -H "Content-Type: application/json" \\\\\\n' +
-                '  -H "Authorization: Bearer YOUR_API_KEY" \\\\\\n' +
-                '  -d ' + JSON.stringify(JSON.stringify({jsonrpc:"2.0",id:1,method:"initialize",params:{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"curl",version:"1.0.0"}}}, null, 2));
-              if(elTool) elTool.textContent =
-                'curl -sS -X POST "' + mcpUrl + '" \\\\\\n' +
-                '  -H "Content-Type: application/json" \\\\\\n' +
-                '  -H "mcp-session-id: <SESSION_ID>" \\\\\\n' +
-                '  -H "Authorization: Bearer YOUR_API_KEY" \\\\\\n' +
-                '  -d ' + JSON.stringify(JSON.stringify({jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"time_now",arguments:{timezone:"Asia/Shanghai"}}}, null, 2));
+              if(elInit){
+                const initBody = JSON.stringify({jsonrpc:"2.0",id:1,method:"initialize",params:{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"curl",version:"1.0.0"}}}, null, 2);
+                elInit.textContent = [
+                  'curl -sS -X POST "' + mcpUrl + '"' + cont,
+                  '  -H "Content-Type: application/json"' + cont,
+                  '  -H "Authorization: Bearer YOUR_API_KEY"' + cont,
+                  '  -d ' + bashSingleQuote(initBody),
+                ].join('\\n');
+              }
+              if(elTool){
+                const toolBody = JSON.stringify({jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"time_now",arguments:{timezone:"Asia/Shanghai"}}}, null, 2);
+                elTool.textContent = [
+                  'curl -sS -X POST "' + mcpUrl + '"' + cont,
+                  '  -H "Content-Type: application/json"' + cont,
+                  '  -H "mcp-session-id: <SESSION_ID>"' + cont,
+                  '  -H "Authorization: Bearer YOUR_API_KEY"' + cont,
+                  '  -d ' + bashSingleQuote(toolBody),
+                ].join('\\n');
+              }
             }
 
             async function loadStats(){
