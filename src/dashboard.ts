@@ -5,6 +5,88 @@ import type { RedisClientLike } from "./redisLike.js";
 import { getGlobalDailyLimitCached } from "./quota.js";
 import { hashPassword, verifyPassword } from "./security.js";
 import { iconCopySvg, layoutHtml } from "./ui.js";
+import { requireCaptcha } from "./captcha.js";
+
+function isAjax(req: Request) {
+  const xrw = (req.get("x-requested-with") ?? "").toLowerCase();
+  const accept = (req.get("accept") ?? "").toLowerCase();
+  return xrw === "fetch" || accept.includes("application/json");
+}
+
+function authPageScripts(opts: { redirectTo: string }) {
+  // 纯原生 JS：拦截表单提交，用 fetch 提交，失败时 toast 提示并刷新验证码图。
+  return `
+(function(){
+  var form = document.querySelector('form.form');
+  if(!form) return;
+
+  var wrap = document.createElement('div');
+  wrap.className = 'toast-wrap';
+  wrap.innerHTML = '<div class="toast" id="toast"><div class="toast-title">操作失败</div><div class="toast-msg" id="toast-msg"></div><div class="toast-actions"><button class="btn btn-primary" type="button" id="toast-ok">知道了</button></div></div>';
+  document.body.appendChild(wrap);
+  var toast = document.getElementById('toast');
+  var toastMsg = document.getElementById('toast-msg');
+  var toastOk = document.getElementById('toast-ok');
+
+  function showToast(msg){
+    if(toastMsg) toastMsg.textContent = msg || '请求失败';
+    if(toast) toast.setAttribute('data-show','true');
+  }
+  function hideToast(){
+    if(toast) toast.setAttribute('data-show','false');
+  }
+  if(toastOk) toastOk.addEventListener('click', hideToast);
+
+  function refreshCaptcha(){
+    var img = document.querySelector('img[alt="captcha"]');
+    if(!img) return;
+    try{
+      var u = new URL(img.getAttribute('src') || '', location.href);
+      u.searchParams.set('t', String(Date.now()));
+      img.setAttribute('src', u.toString());
+    }catch(e){}
+  }
+
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var submitBtn = form.querySelector('button[type="submit"]');
+    if(submitBtn) submitBtn.disabled = true;
+
+    (async function(){
+      try{
+        var fd = new FormData(form);
+        var body = new URLSearchParams();
+        fd.forEach(function(v,k){ body.set(k, String(v)); });
+
+        var r = await fetch(form.getAttribute('action') || location.pathname, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json', 'X-Requested-With': 'fetch' },
+          body: body.toString()
+        });
+
+        var data = null;
+        try{ data = await r.json(); }catch(_e){ data = null; }
+        if(r.ok && data && data.ok){
+          location.href = data.redirect || ${JSON.stringify(opts.redirectTo)};
+          return;
+        }
+
+        var msg = (data && data.error) ? data.error : ('请求失败（' + r.status + '）');
+        showToast(msg);
+        refreshCaptcha();
+        var cap = form.querySelector('input[name="captcha"]');
+        if(cap) cap.value = '';
+      }catch(err){
+        showToast('网络错误，请重试');
+        refreshCaptcha();
+      }finally{
+        if(submitBtn) submitBtn.disabled = false;
+      }
+    })();
+  });
+})();`;
+}
 
 async function requireDashboardSession(req: Request, res: Response, deps: { redis: RedisClientLike; cookieName: string }) {
   const sid = (req.cookies?.[deps.cookieName] as string | undefined) ?? "";
@@ -45,6 +127,7 @@ export function registerDashboardRoutes(
     cookieName: string;
     ttlSeconds: number;
     cookieSecure: boolean;
+    captchaIgnoreCase: boolean;
     defaultFreeDailyRequestLimit: number;
     policyCacheSeconds: number;
     getServerStats: () => {
@@ -57,7 +140,7 @@ export function registerDashboardRoutes(
     };
   },
 ) {
-  const { db, redis, cookieName, ttlSeconds, cookieSecure } = deps;
+  const { db, redis, cookieName, ttlSeconds, cookieSecure, captchaIgnoreCase } = deps;
   // Dashboard 页面复用 Admin 的 UI 基础样式与布局（见 src/ui.ts）。
 
   function setSession(res: Response, sid: string) {
@@ -74,6 +157,7 @@ export function registerDashboardRoutes(
     res.status(200).type("html").send(
       layoutHtml({
         title: "Dashboard Login",
+        scripts: authPageScripts({ redirectTo: "/dashboard" }),
         body: `
 <div class="shell">
   <div class="auth">
@@ -86,7 +170,6 @@ export function registerDashboardRoutes(
     </div>
 
     <h1>登录</h1>
-    <p class="hint">用户后台：管理 API Keys 与配额。</p>
 
     <div class="card card-pad" style="box-shadow:var(--shadow)">
       <form class="form" method="post" action="/dashboard/login">
@@ -97,6 +180,18 @@ export function registerDashboardRoutes(
         <div>
           <label>Password</label>
           <input class="input" type="password" name="password" autocomplete="current-password" required />
+        </div>
+        <div>
+          <label>验证码（点击图片刷新）</label>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input class="input" name="captcha" autocomplete="off" required />
+            <img
+              src="/captcha/svg?scene=dashboard_login"
+              alt="captcha"
+              style="height:40px;cursor:pointer;border-radius:12px;border:1px solid hsl(var(--input));background:hsl(var(--popover))"
+              onclick="this.src='/captcha/svg?scene=dashboard_login&t='+Date.now()"
+            />
+          </div>
         </div>
         <button class="btn btn-primary" type="submit" style="height:40px;border-radius:12px">登录</button>
         <div class="muted" style="font-size:12px">没有账号？<a href="/dashboard/register">去注册</a></div>
@@ -113,6 +208,7 @@ export function registerDashboardRoutes(
     res.status(200).type("html").send(
       layoutHtml({
         title: "Dashboard Register",
+        scripts: authPageScripts({ redirectTo: "/dashboard" }),
         body: `
 <div class="shell">
   <div class="auth">
@@ -125,7 +221,6 @@ export function registerDashboardRoutes(
     </div>
 
     <h1>注册</h1>
-    <p class="hint">注册账号后可自助创建 API Key。</p>
 
     <div class="card card-pad" style="box-shadow:var(--shadow)">
       <form class="form" method="post" action="/dashboard/register">
@@ -136,6 +231,18 @@ export function registerDashboardRoutes(
         <div>
           <label>Password（>=8）</label>
           <input class="input" type="password" name="password" autocomplete="new-password" required />
+        </div>
+        <div>
+          <label>验证码（点击图片刷新）</label>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input class="input" name="captcha" autocomplete="off" required />
+            <img
+              src="/captcha/svg?scene=dashboard_register"
+              alt="captcha"
+              style="height:40px;cursor:pointer;border-radius:12px;border:1px solid hsl(var(--input));background:hsl(var(--popover))"
+              onclick="this.src='/captcha/svg?scene=dashboard_register&t='+Date.now()"
+            />
+          </div>
         </div>
         <button class="btn btn-primary" type="submit" style="height:40px;border-radius:12px">注册并登录</button>
         <div class="muted" style="font-size:12px">已有账号？<a href="/dashboard/login">去登录</a></div>
@@ -149,15 +256,33 @@ export function registerDashboardRoutes(
   });
 
   app.post("/dashboard/register", async (req: Request, res: Response) => {
+    const ajax = isAjax(req);
+
+    // 注册必须验证码：一次性校验通过即删除。
+    if (
+      !(await requireCaptcha(req, res, {
+        redis,
+        scene: "dashboard_register",
+        value: req.body?.captcha,
+        ignoreCase: captchaIgnoreCase,
+        format: ajax ? "json" : "text",
+      }))
+    )
+      return;
+
     const email = String(req.body?.email ?? "").toLowerCase();
     const password = String(req.body?.password ?? "");
-    if (!email.includes("@") || password.length < 8) return res.status(400).send("Invalid input.");
+    if (!email.includes("@") || password.length < 8) {
+      if (ajax) return res.status(400).json({ ok: false, error: "Invalid input" });
+      return res.status(400).send("Invalid input.");
+    }
 
     const id = randomUUID();
     const passwordHash = await hashPassword(password);
     try {
       await db.query("INSERT INTO accounts (id, email, password_hash) VALUES ($1,$2,$3)", [id, email, passwordHash]);
     } catch {
+      if (ajax) return res.status(409).json({ ok: false, error: "Email 已存在" });
       return res
         .status(409)
         .type("html")
@@ -172,10 +297,25 @@ export function registerDashboardRoutes(
     const sid = randomUUID();
     await redis.set(`sess:${sid}`, id, { EX: ttlSeconds });
     setSession(res, sid);
+    if (ajax) return res.status(200).json({ ok: true, redirect: "/dashboard" });
     res.redirect(302, "/dashboard");
   });
 
   app.post("/dashboard/login", async (req: Request, res: Response) => {
+    const ajax = isAjax(req);
+
+    // 登录必须验证码：一次性校验通过即删除。
+    if (
+      !(await requireCaptcha(req, res, {
+        redis,
+        scene: "dashboard_login",
+        value: req.body?.captcha,
+        ignoreCase: captchaIgnoreCase,
+        format: ajax ? "json" : "text",
+      }))
+    )
+      return;
+
     const email = String(req.body?.email ?? "").toLowerCase();
     const password = String(req.body?.password ?? "");
     const r = await db.query<{ id: string; password_hash: string; disabled_at: string | null }>(
@@ -183,13 +323,20 @@ export function registerDashboardRoutes(
       [email],
     );
     const row = r.rows[0];
-    if (!row || row.disabled_at) return res.status(401).send("Invalid credentials.");
+    if (!row || row.disabled_at) {
+      if (ajax) return res.status(401).json({ ok: false, error: "Invalid credentials" });
+      return res.status(401).send("Invalid credentials.");
+    }
     const ok = await verifyPassword(password, row.password_hash);
-    if (!ok) return res.status(401).send("Invalid credentials.");
+    if (!ok) {
+      if (ajax) return res.status(401).json({ ok: false, error: "Invalid credentials" });
+      return res.status(401).send("Invalid credentials.");
+    }
 
     const sid = randomUUID();
     await redis.set(`sess:${sid}`, row.id, { EX: ttlSeconds });
     setSession(res, sid);
+    if (ajax) return res.status(200).json({ ok: true, redirect: "/dashboard" });
     res.redirect(302, "/dashboard");
   });
 

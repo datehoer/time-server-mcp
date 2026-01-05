@@ -4,14 +4,26 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import type { RedisClientLike } from "./redisLike.js";
 import { hashPassword, verifyPassword } from "./security.js";
+import { requireCaptcha } from "./captcha.js";
 
 export function registerAuthRoutes(
   app: Express,
-  deps: { db: Db; redis: RedisClientLike; cookieName: string; ttlSeconds: number; cookieSecure: boolean },
+  deps: {
+    db: Db;
+    redis: RedisClientLike;
+    cookieName: string;
+    ttlSeconds: number;
+    cookieSecure: boolean;
+    captchaIgnoreCase: boolean;
+  },
 ) {
-  const { db, redis, cookieName, ttlSeconds, cookieSecure } = deps;
+  const { db, redis, cookieName, ttlSeconds, cookieSecure, captchaIgnoreCase } = deps;
 
-  const RegisterSchema = z.object({ email: z.string().email(), password: z.string().min(8).max(200) });
+  const RegisterSchema = z.object({
+    email: z.string().email(),
+    password: z.string().min(8).max(200),
+    captcha: z.string().min(1).max(64),
+  });
   const LoginSchema = RegisterSchema;
 
   function setSession(res: Response, sid: string) {
@@ -28,6 +40,18 @@ export function registerAuthRoutes(
     const input = RegisterSchema.safeParse(req.body);
     if (!input.success) return res.status(400).json({ ok: false, error: "Invalid input" });
 
+    // 注册必须验证码：场景与入口绑定；一次性校验通过即删除。
+    if (
+      !(await requireCaptcha(req, res, {
+        redis,
+        scene: "auth_register",
+        value: input.data.captcha,
+        ignoreCase: captchaIgnoreCase,
+        format: "json",
+      }))
+    )
+      return;
+
     const email = input.data.email.toLowerCase();
     const passwordHash = await hashPassword(input.data.password);
     const id = randomUUID();
@@ -43,6 +67,18 @@ export function registerAuthRoutes(
   app.post("/auth/login", async (req: Request, res: Response) => {
     const input = LoginSchema.safeParse(req.body);
     if (!input.success) return res.status(400).json({ ok: false, error: "Invalid input" });
+
+    // 登录必须验证码：场景与入口绑定；一次性校验通过即删除。
+    if (
+      !(await requireCaptcha(req, res, {
+        redis,
+        scene: "auth_login",
+        value: input.data.captcha,
+        ignoreCase: captchaIgnoreCase,
+        format: "json",
+      }))
+    )
+      return;
 
     const email = input.data.email.toLowerCase();
     const r = await db.query<{ id: string; password_hash: string; disabled_at: string | null }>(

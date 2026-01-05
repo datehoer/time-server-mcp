@@ -51,6 +51,10 @@ set -a; source .env; set +a; pnpm start
 - `AUTH_COOKIE_SECURE`：是否设置 `Secure` Cookie（默认 `1`；HTTPS 站点建议保持开启）
 - `REQUEST_LOG_RETENTION_DAYS`：请求明细留存天数（默认 `7`；仅记录 `tools/call`）
 - `API_KEY_ENCRYPTION_SECRET`：方案B（可随时复制明文 API Key）所需，32 bytes base64（AES-256-GCM）
+- `CAPTCHA_SESSION_SECRET`：验证码会话密钥（建议单独设置；未设置时会尝试复用 `API_KEY_ENCRYPTION_SECRET` 或 `ADMIN_COOKIE_SECRET`）
+- `CAPTCHA_TTL_SECONDS`：验证码有效期（默认 `180` 秒）
+- `CAPTCHA_LENGTH`：验证码长度（默认 `6`）
+- `CAPTCHA_IGNORE_CASE`：是否忽略大小写（默认 `1`）
 
 生成示例：
 
@@ -86,8 +90,9 @@ set -a; source .env; set +a; pnpm start
 
 2) 注册/登录：
 
-- `POST /auth/register`：`{ email, password }`
-- `POST /auth/login`：`{ email, password }`（成功后写入 Cookie）
+- `GET /captcha/svg?scene=auth_register|auth_login`：获取 SVG 验证码（需要保留 Cookie 才能完成后续校验）
+- `POST /auth/register`：`{ email, password, captcha }`
+- `POST /auth/login`：`{ email, password, captcha }`（成功后写入 Cookie）
 - `POST /auth/logout`
 
 3) 管理 API Key（需登录 Cookie）：
@@ -105,7 +110,7 @@ set -a; source .env; set +a; pnpm start
 
 ## Dashboard（用户后台）
 
-- `GET /dashboard/login`、`GET /dashboard/register`：页面版登录/注册
+- `GET /dashboard/login`、`GET /dashboard/register`：页面版登录/注册（均需要验证码）
 - `GET /dashboard`：Key 管理与复制（默认仅掩码显示，点复制才临时拉取明文并复制）
 
 ## Docker Compose 部署

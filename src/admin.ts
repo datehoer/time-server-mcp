@@ -1,9 +1,9 @@
 import type { Request, Response } from "express";
-import { randomInt } from "node:crypto";
 import type { Db } from "./db.js";
 import type { RedisClientLike } from "./redisLike.js";
 import { parseCookies, signCookie, verifySignedCookie } from "./httpUtil.js";
 import { escapeHtml, layoutHtml } from "./ui.js";
+import { requireCaptcha } from "./captcha.js";
 
 export type AdminConfig = {
   username: string;
@@ -11,6 +11,7 @@ export type AdminConfig = {
   cookieSecret: string;
   cookieSecure: boolean;
   sessionTtlSeconds: number;
+  captchaIgnoreCase: boolean;
 };
 
 export type AdminDeps = {
@@ -20,7 +21,87 @@ export type AdminDeps = {
 };
 
 type SessionPayload = { u: string; exp: number };
-type CaptchaPayload = { a: number; b: number; exp: number };
+
+function isAjax(req: Request) {
+  const xrw = (req.get("x-requested-with") ?? "").toLowerCase();
+  const accept = (req.get("accept") ?? "").toLowerCase();
+  return xrw === "fetch" || accept.includes("application/json");
+}
+
+function adminLoginScripts() {
+  // 纯原生 JS：拦截表单提交，用 fetch 提交，失败时 toast 提示并刷新验证码图。
+  return `
+(function(){
+  var form = document.querySelector('form.form');
+  if(!form) return;
+
+  var wrap = document.createElement('div');
+  wrap.className = 'toast-wrap';
+  wrap.innerHTML = '<div class="toast" id="toast"><div class="toast-title">登录失败</div><div class="toast-msg" id="toast-msg"></div><div class="toast-actions"><button class="btn btn-primary" type="button" id="toast-ok">知道了</button></div></div>';
+  document.body.appendChild(wrap);
+  var toast = document.getElementById('toast');
+  var toastMsg = document.getElementById('toast-msg');
+  var toastOk = document.getElementById('toast-ok');
+
+  function showToast(msg){
+    if(toastMsg) toastMsg.textContent = msg || '请求失败';
+    if(toast) toast.setAttribute('data-show','true');
+  }
+  function hideToast(){
+    if(toast) toast.setAttribute('data-show','false');
+  }
+  if(toastOk) toastOk.addEventListener('click', hideToast);
+
+  function refreshCaptcha(){
+    var img = document.querySelector('img[alt="captcha"]');
+    if(!img) return;
+    try{
+      var u = new URL(img.getAttribute('src') || '', location.href);
+      u.searchParams.set('t', String(Date.now()));
+      img.setAttribute('src', u.toString());
+    }catch(e){}
+  }
+
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var submitBtn = form.querySelector('button[type="submit"]');
+    if(submitBtn) submitBtn.disabled = true;
+
+    (async function(){
+      try{
+        var fd = new FormData(form);
+        var body = new URLSearchParams();
+        fd.forEach(function(v,k){ body.set(k, String(v)); });
+
+        var r = await fetch(form.getAttribute('action') || location.pathname, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json', 'X-Requested-With': 'fetch' },
+          body: body.toString()
+        });
+
+        var data = null;
+        try{ data = await r.json(); }catch(_e){ data = null; }
+        if(r.ok && data && data.ok){
+          location.href = data.redirect || '/admin';
+          return;
+        }
+
+        var msg = (data && data.error) ? data.error : ('请求失败（' + r.status + '）');
+        showToast(msg);
+        refreshCaptcha();
+        var cap = form.querySelector('input[name="captcha"]');
+        if(cap) cap.value = '';
+      }catch(err){
+        showToast('网络错误，请重试');
+        refreshCaptcha();
+      }finally{
+        if(submitBtn) submitBtn.disabled = false;
+      }
+    })();
+  });
+})();`;
+}
 
 function setCookie(
   res: Response,
@@ -96,24 +177,13 @@ function renderWhenUtc(s: unknown) {
 
 export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps) {
   app.get("/admin/login", (_req: Request, res: Response) => {
-    const a = randomInt(1, 10);
-    const b = randomInt(1, 10);
-    const exp = Date.now() + 5 * 60_000;
-    const captcha = signCookie(cfg.cookieSecret, { a, b, exp } satisfies CaptchaPayload);
-    setCookie(res, "admin_captcha", captcha, {
-      maxAgeSeconds: 5 * 60,
-      httpOnly: true,
-      secure: cfg.cookieSecure,
-      sameSite: "Lax",
-      path: "/admin",
-    });
-
     res
       .status(200)
       .type("html")
       .send(
         layoutHtml({
           title: "Admin Login",
+          scripts: adminLoginScripts(),
           body: `
 <div class="shell">
   <div class="auth">
@@ -126,7 +196,6 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
     </div>
 
     <h1>登录</h1>
-    <p class="hint">后端管理后台：账号/Key 管理（最小可用版）。</p>
 
     <div class="card card-pad" style="box-shadow:var(--shadow)">
       <form class="form" method="post" action="/admin/login">
@@ -139,11 +208,18 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
           <input class="input" type="password" name="password" autocomplete="current-password" required />
         </div>
         <div>
-          <label>验证码：${a} + ${b} = ?</label>
-          <input class="input" name="captcha" inputmode="numeric" required />
+          <label>验证码（点击图片刷新）</label>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input class="input" name="captcha" autocomplete="off" required />
+            <img
+              src="/captcha/svg?scene=admin_login"
+              alt="captcha"
+              style="height:40px;cursor:pointer;border-radius:12px;border:1px solid hsl(var(--input));background:hsl(var(--popover))"
+              onclick="this.src='/captcha/svg?scene=admin_login&t='+Date.now()"
+            />
+          </div>
         </div>
         <button class="btn btn-primary" type="submit" style="height:40px;border-radius:12px">登录</button>
-        <div class="muted" style="font-size:12px">无注册入口，仅允许配置账号登录。</div>
       </form>
     </div>
   </div>
@@ -153,28 +229,35 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
       );
   });
 
-  app.post("/admin/login", (req: Request, res: Response) => {
-    const cookies = parseCookies(req.headers.cookie);
-    const captcha = verifySignedCookie<CaptchaPayload>(cfg.cookieSecret, cookies["admin_captcha"]);
-    if (!captcha || captcha.exp <= Date.now()) {
-      res.status(400).send("Captcha expired. Please retry.");
+  app.post("/admin/login", async (req: Request, res: Response) => {
+    const ajax = isAjax(req);
+    if (!deps.redis) {
+      if (ajax) return res.status(500).json({ ok: false, error: "Redis disabled" });
+      res.status(500).send("Redis disabled.");
       return;
     }
+
+    // Admin 登录必须验证码：一次性校验通过即删除。
+    if (
+      !(await requireCaptcha(req, res, {
+        redis: deps.redis,
+        scene: "admin_login",
+        value: req.body?.captcha,
+        ignoreCase: cfg.captchaIgnoreCase,
+        format: ajax ? "json" : "text",
+      }))
+    )
+      return;
 
     const username = String(req.body?.username ?? "");
     const password = String(req.body?.password ?? "");
-    const answer = Number.parseInt(String(req.body?.captcha ?? ""), 10);
-    if (!Number.isFinite(answer) || answer !== captcha.a + captcha.b) {
-      res.status(400).send("Captcha incorrect.");
-      return;
-    }
 
     if (username !== cfg.username || password !== cfg.password) {
+      if (ajax) return res.status(401).json({ ok: false, error: "Invalid credentials" });
       res.status(401).send("Invalid credentials.");
       return;
     }
 
-    clearCookie(res, "admin_captcha", "/admin");
     const exp = Date.now() + cfg.sessionTtlSeconds * 1000;
     const session = signCookie(cfg.cookieSecret, { u: cfg.username, exp } satisfies SessionPayload);
     setCookie(res, "admin_session", session, {
@@ -184,6 +267,7 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
       sameSite: "Lax",
       path: "/admin",
     });
+    if (ajax) return res.status(200).json({ ok: true, redirect: "/admin" });
     res.redirect(302, "/admin");
   });
 

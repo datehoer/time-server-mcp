@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import cookieParser from "cookie-parser";
+import session from "express-session";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -25,6 +26,7 @@ import { registerAuthRoutes } from "./auth.js";
 import { registerMeRoutes } from "./me.js";
 import { registerDashboardRoutes } from "./dashboard.js";
 import { registerHomeRoutes } from "./home.js";
+import { registerCaptchaRoutes } from "./captcha.js";
 import { requireApiKey } from "./mcpAuth.js";
 import { incrDailyIfBelow, incrDailyPairIfBelow, secondsUntilNextUtcDay, utcDayKey } from "./mcpQuota.js";
 import { getGlobalDailyLimitCached, getToolDailyLimitCached } from "./quota.js";
@@ -390,6 +392,33 @@ if (dbAuthEnabled && !cfg.API_KEY_ENCRYPTION_SECRET) {
   throw new Error("AUTH_MODE=db|both requires API_KEY_ENCRYPTION_SECRET (32 bytes base64).");
 }
 
+const adminEnabled = Boolean((process.env.ADMIN_USERNAME ?? "") && (process.env.ADMIN_PASSWORD ?? "") && (process.env.ADMIN_COOKIE_SECRET ?? ""));
+
+// 验证码：使用 express-session 绑定会话（仅存 sid）；验证码文本写入 Redis（带 TTL、一次性校验）。
+const captchaSessionSecret = cfg.CAPTCHA_SESSION_SECRET ?? cfg.API_KEY_ENCRYPTION_SECRET ?? process.env.ADMIN_COOKIE_SECRET ?? "";
+if ((adminEnabled || (dbAuthEnabled && db && redis)) && !captchaSessionSecret) {
+  throw new Error("Captcha requires CAPTCHA_SESSION_SECRET (or reuse API_KEY_ENCRYPTION_SECRET / ADMIN_COOKIE_SECRET).");
+}
+if (redis && captchaSessionSecret) {
+  app.use(
+    ["/captcha", "/admin", "/dashboard", "/auth"],
+    session({
+      name: "captcha_sid",
+      secret: captchaSessionSecret,
+      resave: false,
+      saveUninitialized: true,
+      cookie: { httpOnly: true, sameSite: "lax", secure: cfg.AUTH_COOKIE_SECURE, maxAge: 7 * 24 * 3600 * 1000, path: "/" },
+    }),
+  );
+
+  registerCaptchaRoutes(app, {
+    redis,
+    ttlSeconds: cfg.CAPTCHA_TTL_SECONDS,
+    length: cfg.CAPTCHA_LENGTH,
+    ignoreCase: cfg.CAPTCHA_IGNORE_CASE,
+  });
+}
+
 // 主页：始终启用（Dashboard 按能力判断显示入口）
 registerHomeRoutes(app, { dashboardEnabled: dbAuthEnabled && Boolean(db) && Boolean(redis), authMode });
 
@@ -753,7 +782,7 @@ app.get("/health", (req: Request, res: Response) => {
 const adminUser = process.env.ADMIN_USERNAME ?? "";
 const adminPass = process.env.ADMIN_PASSWORD ?? "";
 const adminCookieSecret = process.env.ADMIN_COOKIE_SECRET ?? "";
-if (adminUser && adminPass && adminCookieSecret) {
+if (adminUser && adminPass && adminCookieSecret && redis) {
   registerAdminRoutes(
     app,
     {
@@ -762,6 +791,7 @@ if (adminUser && adminPass && adminCookieSecret) {
       cookieSecret: adminCookieSecret,
       cookieSecure: (process.env.ADMIN_COOKIE_SECURE ?? "1") !== "0",
       sessionTtlSeconds: Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 3 * 3600),
+      captchaIgnoreCase: cfg.CAPTCHA_IGNORE_CASE,
     },
     {
       db,
@@ -791,6 +821,8 @@ if (adminUser && adminPass && adminCookieSecret) {
       }),
     },
   );
+} else if (adminUser && adminPass && adminCookieSecret && !redis) {
+  console.warn("Admin dashboard disabled: set REDIS_URL (required for captcha).");
 } else {
   console.warn("Admin dashboard disabled: set ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_COOKIE_SECRET to enable /admin.");
 }
@@ -803,6 +835,7 @@ if (dbAuthEnabled && db && redis) {
     cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
     ttlSeconds: cfg.AUTH_SESSION_TTL_SECONDS,
     cookieSecure: cfg.AUTH_COOKIE_SECURE,
+    captchaIgnoreCase: cfg.CAPTCHA_IGNORE_CASE,
   });
   registerMeRoutes(app, {
     db,
@@ -817,6 +850,7 @@ if (dbAuthEnabled && db && redis) {
     cookieName: cfg.AUTH_SESSION_COOKIE_NAME,
     ttlSeconds: cfg.AUTH_SESSION_TTL_SECONDS,
     cookieSecure: cfg.AUTH_COOKIE_SECURE,
+    captchaIgnoreCase: cfg.CAPTCHA_IGNORE_CASE,
     defaultFreeDailyRequestLimit: cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
     policyCacheSeconds: cfg.POLICY_CACHE_SECONDS,
     getServerStats: () => ({

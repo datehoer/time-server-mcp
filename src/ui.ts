@@ -264,6 +264,29 @@ export function baseStyles() {
     }
     .input:focus{box-shadow:0 0 0 3px hsl(var(--ring) / 0.18);border-color:hsl(var(--ring) / 0.65)}
     .muted{color:hsl(var(--muted-foreground))}
+
+    /* Toast：用于登录/注册失败时的提示弹窗（无框架版） */
+    .toast-wrap{
+      position:fixed;left:0;right:0;top:16px;z-index:9999;
+      display:flex;justify-content:center;
+      pointer-events:none;
+      padding:0 16px;
+    }
+    .toast{
+      pointer-events:auto;
+      max-width:560px;width:100%;
+      border-radius:calc(var(--radius) + 6px);
+      border:1px solid hsl(var(--border));
+      background:hsl(var(--card));
+      color:hsl(var(--foreground));
+      box-shadow:var(--shadow);
+      padding:12px 14px;
+      display:none;
+    }
+    .toast[data-show="true"]{display:block}
+    .toast-title{font-weight:750;font-size:13px}
+    .toast-msg{margin-top:4px;color:hsl(var(--muted-foreground));font-size:13px}
+    .toast-actions{margin-top:10px;display:flex;justify-content:flex-end;gap:10px}
   `;
 }
 

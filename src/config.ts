@@ -31,6 +31,12 @@ export const AppConfigSchema = z.object({
   // 方案B：用于加密存储 API Key 明文（AES-256-GCM，32 bytes base64）
   API_KEY_ENCRYPTION_SECRET: z.string().optional(),
 
+  // 验证码（注册/登录/后台登录）
+  CAPTCHA_SESSION_SECRET: z.string().optional(),
+  CAPTCHA_TTL_SECONDS: z.coerce.number().int().min(30).default(180),
+  CAPTCHA_LENGTH: z.coerce.number().int().min(4).max(10).default(6),
+  CAPTCHA_IGNORE_CASE: Bool01,
+
   // 请求日志
   REQUEST_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).default(7),
   REQUEST_LOG_FLUSH_EVERY_MS: z.coerce.number().int().min(200).default(1000),
@@ -50,6 +56,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     AUTH_SESSION_TTL_SECONDS: env.AUTH_SESSION_TTL_SECONDS,
     AUTH_COOKIE_SECURE: env.AUTH_COOKIE_SECURE,
     API_KEY_ENCRYPTION_SECRET: env.API_KEY_ENCRYPTION_SECRET,
+    CAPTCHA_SESSION_SECRET: env.CAPTCHA_SESSION_SECRET,
+    CAPTCHA_TTL_SECONDS: env.CAPTCHA_TTL_SECONDS,
+    CAPTCHA_LENGTH: env.CAPTCHA_LENGTH,
+    CAPTCHA_IGNORE_CASE: env.CAPTCHA_IGNORE_CASE,
     REQUEST_LOG_RETENTION_DAYS: env.REQUEST_LOG_RETENTION_DAYS,
     REQUEST_LOG_FLUSH_EVERY_MS: env.REQUEST_LOG_FLUSH_EVERY_MS,
     REQUEST_LOG_MAX_BUFFER: env.REQUEST_LOG_MAX_BUFFER,
