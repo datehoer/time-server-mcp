@@ -1,22 +1,24 @@
-import type { Request, Response } from "express";
 import type { Db } from "./db.js";
 import type { RedisClientLike } from "./redisLike.js";
 import { sha256Hex } from "./security.js";
 
 export type ApiKeyAuth = { accountId: string; apiKeyId: string };
 
-function parseBearer(req: Request): string | null {
-  const auth = req.header("authorization") ?? "";
+type ReqLike = { headers: Record<string, unknown> };
+type ReplyLike = { code: (status: number) => ReplyLike; send: (body: unknown) => unknown };
+
+function parseBearer(req: ReqLike): string | null {
+  const auth = String((req.headers["authorization"] ?? req.headers["Authorization"]) ?? "");
   const prefix = "Bearer ";
   if (!auth.startsWith(prefix)) return null;
   const token = auth.slice(prefix.length).trim();
   return token.length ? token : null;
 }
 
-export async function requireApiKey(req: Request, res: Response, deps: { db: Db; redis: RedisClientLike }) {
+export async function requireApiKey(req: ReqLike, reply: ReplyLike, deps: { db: Db; redis: RedisClientLike }) {
   const token = parseBearer(req);
   if (!token) {
-    res.status(401).send("Unauthorized");
+    reply.code(401).send("Unauthorized");
     return null;
   }
   const keyHash = sha256Hex(token);
@@ -30,12 +32,12 @@ export async function requireApiKey(req: Request, res: Response, deps: { db: Db;
       // 账号禁用：用于 Admin 侧“立即生效”，避免缓存窗口
       const acctDisabled = await deps.redis.get(`acctdis:${accountId}`);
       if (acctDisabled) {
-        res.status(401).send("Unauthorized");
+        reply.code(401).send("Unauthorized");
         return null;
       }
       const revoked = await deps.redis.get(`akrev:${apiKeyId}`);
       if (revoked) {
-        res.status(401).send("Unauthorized");
+        reply.code(401).send("Unauthorized");
         return null;
       }
       return { accountId, apiKeyId } as ApiKeyAuth;
@@ -56,9 +58,10 @@ LIMIT 1
   if (!row || row.revoked_at || row.disabled_at) {
     if (row?.id) await deps.redis.set(`akrev:${row.id}`, "1", { EX: 600 });
     if (row?.account_id && row.disabled_at) await deps.redis.set(`acctdis:${row.account_id}`, "1");
-    res.status(401).send("Unauthorized");
+    reply.code(401).send("Unauthorized");
     return null;
   }
   await deps.redis.set(cacheKey, `${row.account_id}:${row.id}`, { EX: 300 });
   return { accountId: row.account_id, apiKeyId: row.id } as ApiKeyAuth;
 }
+

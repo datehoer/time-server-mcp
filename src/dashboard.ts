@@ -1,15 +1,18 @@
-import type { Express, Request, Response } from "express";
+import { Controller, Get, Post, Req, Res } from "@nestjs/common";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
-import type { Db } from "./db.js";
 import type { RedisClientLike } from "./redisLike.js";
 import { getGlobalDailyLimitCached } from "./quota.js";
 import { hashPassword, verifyPassword } from "./security.js";
-import { iconCopySvg, layoutHtml } from "./ui.js";
+import { iconCopySvg, layoutHtml, modalInlineScripts } from "./ui.js";
 import { requireCaptcha } from "./captcha.js";
+import { getOrigin } from "./origin.js";
+import { AppContextService } from "./appContext.service.js";
+import { sendApiError } from "./apiError.js";
 
-function isAjax(req: Request) {
-  const xrw = (req.get("x-requested-with") ?? "").toLowerCase();
-  const accept = (req.get("accept") ?? "").toLowerCase();
+function isAjax(req: FastifyRequest) {
+  const xrw = String(req.headers["x-requested-with"] ?? "").toLowerCase();
+  const accept = String(req.headers["accept"] ?? "").toLowerCase();
   return xrw === "fetch" || accept.includes("application/json");
 }
 
@@ -72,7 +75,10 @@ function authPageScripts(opts: { redirectTo: string }) {
           return;
         }
 
-        var msg = (data && data.error) ? data.error : ('请求失败（' + r.status + '）');
+        // UI 默认中文；同时保留服务端返回的双语结果（error_i18n）
+        var msg =
+          (data && data.error_i18n && data.error_i18n.zh) ? data.error_i18n.zh
+          : ((data && data.error) ? data.error : ('请求失败（' + r.status + '）'));
         showToast(msg);
         refreshCaptcha();
         var cap = form.querySelector('input[name="captcha"]');
@@ -88,24 +94,23 @@ function authPageScripts(opts: { redirectTo: string }) {
 })();`;
 }
 
-async function requireDashboardSession(req: Request, res: Response, deps: { redis: RedisClientLike; cookieName: string }) {
-  const sid = (req.cookies?.[deps.cookieName] as string | undefined) ?? "";
+async function requireDashboardSession(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  deps: { redis: RedisClientLike; cookieName: string },
+) {
+  const cookies = (req as any).cookies as Record<string, string> | undefined;
+  const sid = cookies?.[deps.cookieName] ?? "";
   if (!sid) {
-    res.redirect(302, "/dashboard/login");
+    reply.redirect("/dashboard/login", 302);
     return null;
   }
   const accountId = await deps.redis.get(`sess:${sid}`);
   if (!accountId) {
-    res.redirect(302, "/dashboard/login");
+    reply.redirect("/dashboard/login", 302);
     return null;
   }
   return { accountId, sid };
-}
-
-function getOrigin(req: Request) {
-  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim() || req.protocol || "http";
-  const host = (req.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim() || req.get("host") || "127.0.0.1";
-  return `${proto}://${host}`;
 }
 
 function utcDayRange(d = new Date()) {
@@ -119,42 +124,53 @@ function utcYmdKey(d: Date) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
-export function registerDashboardRoutes(
-  app: Express,
-  deps: {
-    db: Db;
-    redis: RedisClientLike;
-    cookieName: string;
-    ttlSeconds: number;
-    cookieSecure: boolean;
-    captchaIgnoreCase: boolean;
-    defaultFreeDailyRequestLimit: number;
-    policyCacheSeconds: number;
-    getServerStats: () => {
-      uptime_s: number;
-      transports: number;
-      redis: boolean;
-      db: boolean;
-      auth_mode: string;
-      limits: { rate_limit_per_ip_per_minute: number; sse_max_conns_per_ip: number };
-    };
-  },
-) {
-  const { db, redis, cookieName, ttlSeconds, cookieSecure, captchaIgnoreCase } = deps;
-  // Dashboard 页面复用 Admin 的 UI 基础样式与布局（见 src/ui.ts）。
+type DashboardDeps = {
+  db: NonNullable<AppContextService["db"]>;
+  redis: RedisClientLike;
+  cookieName: string;
+  ttlSeconds: number;
+  cookieSecure: boolean;
+  captchaIgnoreCase: boolean;
+  defaultFreeDailyRequestLimit: number;
+  policyCacheSeconds: number;
+};
 
-  function setSession(res: Response, sid: string) {
-    res.cookie(cookieName, sid, {
+@Controller("dashboard")
+export class DashboardController {
+  constructor(private readonly ctx: AppContextService) {}
+
+  private deps(reply: FastifyReply): DashboardDeps | null {
+    if (!this.ctx.dashboardEnabled || !this.ctx.db || !this.ctx.redis) {
+      reply.code(404).type("text/plain").send("Dashboard disabled");
+      return null;
+    }
+    return {
+      db: this.ctx.db,
+      redis: this.ctx.redis as any,
+      cookieName: this.ctx.cfg.AUTH_SESSION_COOKIE_NAME,
+      ttlSeconds: this.ctx.cfg.AUTH_SESSION_TTL_SECONDS,
+      cookieSecure: this.ctx.cfg.AUTH_COOKIE_SECURE,
+      captchaIgnoreCase: this.ctx.cfg.CAPTCHA_IGNORE_CASE,
+      defaultFreeDailyRequestLimit: this.ctx.cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
+      policyCacheSeconds: this.ctx.cfg.POLICY_CACHE_SECONDS,
+    };
+  }
+
+  private setSession(reply: FastifyReply, deps: DashboardDeps, sid: string) {
+    reply.setCookie(deps.cookieName, sid, {
       httpOnly: true,
       sameSite: "lax",
-      secure: cookieSecure,
-      maxAge: ttlSeconds * 1000,
+      secure: deps.cookieSecure,
+      maxAge: deps.ttlSeconds,
       path: "/",
     });
   }
 
-  app.get("/dashboard/login", (_req, res) => {
-    res.status(200).type("html").send(
+  @Get("login")
+  async loginPage(@Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    reply.code(200).type("text/html").send(
       layoutHtml({
         title: "Dashboard Login",
         scripts: authPageScripts({ redirectTo: "/dashboard" }),
@@ -202,10 +218,13 @@ export function registerDashboardRoutes(
         `,
       }),
     );
-  });
+  }
 
-  app.get("/dashboard/register", (_req, res) => {
-    res.status(200).type("html").send(
+  @Get("register")
+  async registerPage(@Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    reply.code(200).type("text/html").send(
       layoutHtml({
         title: "Dashboard Register",
         scripts: authPageScripts({ redirectTo: "/dashboard" }),
@@ -253,28 +272,34 @@ export function registerDashboardRoutes(
         `,
       }),
     );
-  });
+  }
 
-  app.post("/dashboard/register", async (req: Request, res: Response) => {
+  @Post("register")
+  async register(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    const { db, redis, ttlSeconds, captchaIgnoreCase, cookieSecure } = deps;
     const ajax = isAjax(req);
 
     // 注册必须验证码：一次性校验通过即删除。
     if (
-      !(await requireCaptcha(req, res, {
+      !(await requireCaptcha(req, reply, {
         redis,
         scene: "dashboard_register",
-        value: req.body?.captcha,
+        value: (req as any).body?.captcha,
         ignoreCase: captchaIgnoreCase,
         format: ajax ? "json" : "text",
+        cookieSecure,
       }))
     )
       return;
 
-    const email = String(req.body?.email ?? "").toLowerCase();
-    const password = String(req.body?.password ?? "");
+    const email = String((req as any).body?.email ?? "").toLowerCase();
+    const password = String((req as any).body?.password ?? "");
     if (!email.includes("@") || password.length < 8) {
-      if (ajax) return res.status(400).json({ ok: false, error: "Invalid input" });
-      return res.status(400).send("Invalid input.");
+      const format = ajax ? "json" : "text";
+      sendApiError(req, reply, { format, httpStatus: 400, code: "INVALID_INPUT", i18n: { zh: "输入不合法。", en: "Invalid input." } });
+      return;
     }
 
     const id = randomUUID();
@@ -282,10 +307,13 @@ export function registerDashboardRoutes(
     try {
       await db.query("INSERT INTO accounts (id, email, password_hash) VALUES ($1,$2,$3)", [id, email, passwordHash]);
     } catch {
-      if (ajax) return res.status(409).json({ ok: false, error: "Email 已存在" });
-      return res
-        .status(409)
-        .type("html")
+      if (ajax) {
+        sendApiError(req, reply, { format: "json", httpStatus: 409, code: "EMAIL_EXISTS", i18n: { zh: "Email 已存在。", en: "Email already exists." } });
+        return;
+      }
+      return reply
+        .code(409)
+        .type("text/html")
         .send(
           layoutHtml({
             title: "Register failed",
@@ -296,67 +324,95 @@ export function registerDashboardRoutes(
 
     const sid = randomUUID();
     await redis.set(`sess:${sid}`, id, { EX: ttlSeconds });
-    setSession(res, sid);
-    if (ajax) return res.status(200).json({ ok: true, redirect: "/dashboard" });
-    res.redirect(302, "/dashboard");
-  });
+    this.setSession(reply, deps, sid);
+    if (ajax) return reply.code(200).send({ ok: true, redirect: "/dashboard" });
+    reply.redirect("/dashboard", 302);
+  }
 
-  app.post("/dashboard/login", async (req: Request, res: Response) => {
+  @Post("login")
+  async login(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    const { db, redis, ttlSeconds, captchaIgnoreCase, cookieSecure } = deps;
     const ajax = isAjax(req);
 
     // 登录必须验证码：一次性校验通过即删除。
     if (
-      !(await requireCaptcha(req, res, {
+      !(await requireCaptcha(req, reply, {
         redis,
         scene: "dashboard_login",
-        value: req.body?.captcha,
+        value: (req as any).body?.captcha,
         ignoreCase: captchaIgnoreCase,
         format: ajax ? "json" : "text",
+        cookieSecure,
       }))
     )
       return;
 
-    const email = String(req.body?.email ?? "").toLowerCase();
-    const password = String(req.body?.password ?? "");
+    const email = String((req as any).body?.email ?? "").toLowerCase();
+    const password = String((req as any).body?.password ?? "");
     const r = await db.query<{ id: string; password_hash: string; disabled_at: string | null }>(
       "SELECT id, password_hash, disabled_at FROM accounts WHERE email=$1 LIMIT 1",
       [email],
     );
     const row = r.rows[0];
     if (!row || row.disabled_at) {
-      if (ajax) return res.status(401).json({ ok: false, error: "Invalid credentials" });
-      return res.status(401).send("Invalid credentials.");
+      const format = ajax ? "json" : "text";
+      sendApiError(req, reply, {
+        format,
+        httpStatus: 401,
+        code: "INVALID_CREDENTIALS",
+        i18n: { zh: "账号或密码错误。", en: "Invalid credentials." },
+      });
+      return;
     }
     const ok = await verifyPassword(password, row.password_hash);
     if (!ok) {
-      if (ajax) return res.status(401).json({ ok: false, error: "Invalid credentials" });
-      return res.status(401).send("Invalid credentials.");
+      const format = ajax ? "json" : "text";
+      sendApiError(req, reply, {
+        format,
+        httpStatus: 401,
+        code: "INVALID_CREDENTIALS",
+        i18n: { zh: "账号或密码错误。", en: "Invalid credentials." },
+      });
+      return;
     }
 
     const sid = randomUUID();
     await redis.set(`sess:${sid}`, row.id, { EX: ttlSeconds });
-    setSession(res, sid);
-    if (ajax) return res.status(200).json({ ok: true, redirect: "/dashboard" });
-    res.redirect(302, "/dashboard");
-  });
+    this.setSession(reply, deps, sid);
+    if (ajax) return reply.code(200).send({ ok: true, redirect: "/dashboard" });
+    reply.redirect("/dashboard", 302);
+  }
 
-  app.post("/dashboard/logout", async (req: Request, res: Response) => {
-    const sid = (req.cookies?.[cookieName] as string | undefined) ?? "";
-    if (sid) await redis.del(`sess:${sid}`);
-    res.clearCookie(cookieName, { path: "/" });
-    res.redirect(302, "/dashboard/login");
-  });
+  @Post("logout")
+  async logout(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    const cookies = (req as any).cookies as Record<string, string> | undefined;
+    const sid = cookies?.[deps.cookieName] ?? "";
+    if (sid) await deps.redis.del(`sess:${sid}`);
+    reply.clearCookie(deps.cookieName, { path: "/" });
+    reply.redirect("/dashboard/login", 302);
+  }
 
   // Dashboard：按当前登录账号汇总的状态/配额/Usage（迁移自 /admin，但不暴露其他账号数据）
-  app.get("/dashboard/api/stats", async (req: Request, res: Response) => {
-    const s = await requireDashboardSession(req, res, { redis, cookieName });
+  @Get("api/stats")
+  async apiStats(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    const { db, redis, cookieName } = deps;
+    const s = await requireDashboardSession(req, reply, { redis, cookieName });
     if (!s) return;
 
     const me = await db.query<{ email: string; disabled_at: string | null }>("SELECT email, disabled_at FROM accounts WHERE id=$1 LIMIT 1", [
       s.accountId,
     ]);
     const meRow = me.rows[0];
-    if (!meRow || meRow.disabled_at) return res.status(401).json({ ok: false, error: "Account disabled" });
+    if (!meRow || meRow.disabled_at) {
+      sendApiError(req, reply, { format: "json", httpStatus: 401, code: "ACCOUNT_DISABLED", i18n: { zh: "账号已被禁用。", en: "Account disabled." } });
+      return;
+    }
 
     const { dayStartIso, dayEndIso, utcDay } = utcDayRange(new Date());
     const dayStart = new Date(dayStartIso);
@@ -465,11 +521,18 @@ LIMIT 20
     const mcpUrl = `${origin}/mcp`;
     const healthUrl = `${origin}/health`;
 
-    return res.status(200).json({
+    return reply.code(200).send({
       ok: true,
       utc_day: utcDay,
       account: { id: s.accountId, email: meRow.email ?? "" },
-      overview: deps.getServerStats(),
+      overview: {
+        uptime_s: Math.floor(process.uptime()),
+        transports: Object.keys(this.ctx.transports).length,
+        redis: Boolean(this.ctx.redis),
+        db: Boolean(this.ctx.db),
+        auth_mode: this.ctx.authMode,
+        limits: { rate_limit_per_ip_per_minute: this.ctx.rateLimitPerMinute, sse_max_conns_per_ip: this.ctx.sseMaxConnsPerIp },
+      },
       quota: { timezone: "UTC", counts: "tools/call", daily_limit: dailyLimit, used_today: allowedToday + deniedToday },
       usage: {
         allowed: allowedToday,
@@ -496,12 +559,16 @@ LIMIT 20
         auth_header_hint: "Authorization: Bearer <YOUR_API_KEY>",
       },
     });
-  });
+  }
 
-  app.get("/dashboard", async (req: Request, res: Response) => {
-    const s = await requireDashboardSession(req, res, { redis, cookieName });
+  @Get()
+  async dashboard(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const deps = this.deps(reply);
+    if (!deps) return;
+    const { redis, cookieName } = deps;
+    const s = await requireDashboardSession(req, reply, { redis, cookieName });
     if (!s) return;
-    res.status(200).type("html").send(
+    reply.code(200).type("text/html").send(
       layoutHtml({
         title: "Dashboard",
         body: `
@@ -764,6 +831,7 @@ LIMIT 20
               if(!msg) return;
               setTimeout(() => { if(statusEl.textContent === msg) statusEl.textContent = ''; }, 2000);
             }
+${modalInlineScripts()}
             function fmtDuration(sec){
               sec = Math.max(0, Math.floor(Number(sec)||0));
               const days = Math.floor(sec / 86400);
@@ -775,6 +843,13 @@ LIMIT 20
             }
             function fmtIso(s){ if(!s) return 'Never'; return s.length>=19 ? s.slice(0,19).replace('T',' ') : s; }
             function esc(s){ return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+            function pickErr(j, fallback){
+              try{
+                if(j && j.error_i18n && j.error_i18n.zh) return String(j.error_i18n.zh);
+                if(j && j.error) return String(j.error);
+              }catch(_e){}
+              return fallback || '操作失败';
+            }
             const copyIcon = ${JSON.stringify(iconCopySvg())};
 
             // 折线图：ECharts（无 bundler，直接从 /assets/echarts.min.js 取）
@@ -1068,7 +1143,7 @@ LIMIT 20
               if(idCopy){
                 const r = await fetch('/me/api-keys/' + encodeURIComponent(idCopy) + '/reveal', {method:'POST', credentials:'same-origin'});
                 const j = await r.json().catch(()=>({ok:false}));
-                if(!j.ok){ flash(j.error || '复制失败'); return; }
+                if(!j.ok){ flash(pickErr(j, '复制失败')); return; }
                 await navigator.clipboard.writeText(j.secret);
                 t.dataset.copied = 'true';
                 setTimeout(() => { try{ delete t.dataset.copied; }catch(_){} }, 900);
@@ -1076,10 +1151,25 @@ LIMIT 20
                 return;
               }
               if(idRev){
-                if(!confirm('确定吊销该 Key？吊销后将立即失效。')) return;
+                const tr = t.closest('tr');
+                const name = tr && tr.children && tr.children[0] ? tr.children[0].textContent : '';
+                const prefix = tr && tr.children && tr.children[1] ? tr.children[1].textContent : '';
+                const detail = []
+                  .concat(name ? ['名称：' + name] : [])
+                  .concat(prefix ? ['前缀：' + prefix] : [])
+                  .join('\\n');
+                const ok = await confirmModal({
+                  title: '吊销 API Key',
+                  message: '吊销后将立即失效，且不可恢复。',
+                  detail: detail,
+                  okText: '确认吊销',
+                  cancelText: '取消',
+                  danger: true,
+                });
+                if(!ok) return;
                 const r = await fetch('/me/api-keys/' + encodeURIComponent(idRev), {method:'DELETE', credentials:'same-origin'});
                 const j = await r.json().catch(()=>({ok:false}));
-                if(!j.ok){ flash(j.error || '吊销失败'); return; }
+                if(!j.ok){ flash(pickErr(j, '吊销失败')); return; }
                 flash('已吊销');
                 await loadKeys();
               }
@@ -1088,15 +1178,23 @@ LIMIT 20
             const btnCreate = document.getElementById('btnCreate');
             if(btnCreate){
               btnCreate.addEventListener('click', async () => {
-                const name = prompt('Key 名称（可选）','');
+                const name = await promptModal({
+                  title: '创建 API Key',
+                  message: '可选：填写名称，便于日后识别。',
+                  placeholder: '例如：本地开发 / CI / iPhone',
+                  defaultValue: '',
+                  okText: '创建并复制',
+                  cancelText: '取消',
+                });
+                if(name === null) return;
                 const r = await fetch('/me/api-keys', {
                   method:'POST',
                   credentials:'same-origin',
                   headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({ name: name || '' })
+                  body: JSON.stringify({ name: String(name || '').trim() })
                 });
                 const j = await r.json().catch(()=>({ok:false}));
-                if(!j.ok){ flash(j.error || '创建失败'); return; }
+                if(!j.ok){ flash(pickErr(j, '创建失败')); return; }
                 await navigator.clipboard.writeText(j.secret);
                 flash('Key 已创建并已复制（仅创建时返回一次）');
                 await loadKeys();
@@ -1118,5 +1216,5 @@ LIMIT 20
         `,
       }),
     );
-  });
+  }
 }

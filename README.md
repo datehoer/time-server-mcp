@@ -11,7 +11,7 @@
 
 ## 快速开始
 
-> 该项目使用 TypeScript + ESM，编译产物输出到 `dist/`，运行时入口为 `dist/index.js`。
+> 该项目使用 TypeScript + NestJS（Fastify 底座），编译产物输出到 `dist/`，运行时入口为 `dist/main.js`。
 
 ```bash
 pnpm install

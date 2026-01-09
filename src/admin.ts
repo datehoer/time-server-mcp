@@ -1,9 +1,10 @@
-import type { Request, Response } from "express";
-import type { Db } from "./db.js";
-import type { RedisClientLike } from "./redisLike.js";
+import { Controller, Get, Param, Post, Req, Res } from "@nestjs/common";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { parseCookies, signCookie, verifySignedCookie } from "./httpUtil.js";
-import { escapeHtml, layoutHtml } from "./ui.js";
+import { escapeHtml, layoutHtml, modalInlineScripts } from "./ui.js";
 import { requireCaptcha } from "./captcha.js";
+import { AppContextService } from "./appContext.service.js";
+import { sendApiError } from "./apiError.js";
 
 export type AdminConfig = {
   username: string;
@@ -14,17 +15,11 @@ export type AdminConfig = {
   captchaIgnoreCase: boolean;
 };
 
-export type AdminDeps = {
-  db: Db | null;
-  redis: RedisClientLike | null;
-  getStats: () => Record<string, unknown>;
-};
-
 type SessionPayload = { u: string; exp: number };
 
-function isAjax(req: Request) {
-  const xrw = (req.get("x-requested-with") ?? "").toLowerCase();
-  const accept = (req.get("accept") ?? "").toLowerCase();
+function isAjax(req: FastifyRequest) {
+  const xrw = String(req.headers["x-requested-with"] ?? "").toLowerCase();
+  const accept = String(req.headers["accept"] ?? "").toLowerCase();
   return xrw === "fetch" || accept.includes("application/json");
 }
 
@@ -87,7 +82,10 @@ function adminLoginScripts() {
           return;
         }
 
-        var msg = (data && data.error) ? data.error : ('请求失败（' + r.status + '）');
+        // UI 默认中文；同时保留服务端返回的双语结果（error_i18n）
+        var msg =
+          (data && data.error_i18n && data.error_i18n.zh) ? data.error_i18n.zh
+          : ((data && data.error) ? data.error : ('请求失败（' + r.status + '）'));
         showToast(msg);
         refreshCaptcha();
         var cap = form.querySelector('input[name="captcha"]');
@@ -104,7 +102,7 @@ function adminLoginScripts() {
 }
 
 function setCookie(
-  res: Response,
+  reply: FastifyReply,
   name: string,
   value: string,
   opts: {
@@ -115,21 +113,24 @@ function setCookie(
     path?: string;
   } = {},
 ) {
-  const parts = [`${name}=${encodeURIComponent(value)}`];
-  parts.push(`Path=${opts.path ?? "/"}`);
-  if (opts.httpOnly ?? true) parts.push("HttpOnly");
-  if (opts.secure) parts.push("Secure");
-  parts.push(`SameSite=${opts.sameSite ?? "Lax"}`);
-  if (typeof opts.maxAgeSeconds === "number") parts.push(`Max-Age=${Math.floor(opts.maxAgeSeconds)}`);
-  res.append("Set-Cookie", parts.join("; "));
+  const sameSite = (opts.sameSite ?? "Lax").toLowerCase() as "lax" | "strict";
+  reply.setCookie(name, value, {
+    path: opts.path ?? "/",
+    httpOnly: opts.httpOnly ?? true,
+    secure: opts.secure,
+    sameSite,
+    maxAge: typeof opts.maxAgeSeconds === "number" ? Math.floor(opts.maxAgeSeconds) : undefined,
+  });
 }
 
-function clearCookie(res: Response, name: string, path = "/") {
-  res.append("Set-Cookie", `${name}=; Path=${path}; Max-Age=0`);
+function clearCookie(reply: FastifyReply, name: string, path = "/") {
+  reply.clearCookie(name, { path });
 }
 
-function getSession(req: Request, cfg: AdminConfig): SessionPayload | null {
-  const cookies = parseCookies(req.headers.cookie);
+function getSession(req: FastifyRequest, cfg: AdminConfig): SessionPayload | null {
+  const cookieHeader = typeof req.headers.cookie === "string" ? req.headers.cookie : undefined;
+  const headerCookies = parseCookies(cookieHeader);
+  const cookies = ((req as any).cookies as Record<string, string> | undefined) ?? headerCookies;
   const payload = verifySignedCookie<SessionPayload>(cfg.cookieSecret, cookies["admin_session"]);
   if (!payload) return null;
   if (payload.exp <= Date.now()) return null;
@@ -137,10 +138,10 @@ function getSession(req: Request, cfg: AdminConfig): SessionPayload | null {
   return payload;
 }
 
-function requireSession(req: Request, res: Response, cfg: AdminConfig) {
+function requireSession(req: FastifyRequest, reply: FastifyReply, cfg: AdminConfig) {
   const s = getSession(req, cfg);
   if (!s) {
-    res.redirect(302, "/admin/login");
+    reply.redirect("/admin/login", 302);
     return null;
   }
   return s;
@@ -175,11 +176,58 @@ function renderWhenUtc(s: unknown) {
   return `<div class="when"><div class="when-primary mono">${escapeHtml(date)}</div><div class="when-sub mono">${escapeHtml(time)} UTC</div></div>`;
 }
 
-export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps) {
-  app.get("/admin/login", (_req: Request, res: Response) => {
-    res
-      .status(200)
-      .type("html")
+@Controller("admin")
+export class AdminController {
+  constructor(private readonly ctx: AppContextService) {}
+
+  private adminCfg(reply: FastifyReply): AdminConfig | null {
+    if (!this.ctx.adminEnabled || !this.ctx.redis) {
+      reply.code(404).type("text/plain").send("Admin disabled");
+      return null;
+    }
+    return {
+      username: this.ctx.adminUser,
+      password: this.ctx.adminPass,
+      cookieSecret: this.ctx.adminCookieSecret,
+      cookieSecure: (process.env.ADMIN_COOKIE_SECURE ?? "1") !== "0",
+      sessionTtlSeconds: Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 3 * 3600),
+      captchaIgnoreCase: this.ctx.cfg.CAPTCHA_IGNORE_CASE,
+    };
+  }
+
+  private getStats() {
+    return {
+      ok: true,
+      uptime_s: Math.floor(process.uptime()),
+      transports: Object.keys(this.ctx.transports).length,
+      limits: { rate_limit_per_ip_per_minute: this.ctx.rateLimitPerMinute, sse_max_conns_per_ip: this.ctx.sseMaxConnsPerIp },
+      redis: Boolean(this.ctx.redis),
+      db: Boolean(this.ctx.db),
+      quota: {
+        timezone: "UTC",
+        counts: "tools/call",
+        default_free_daily_request_limit: this.ctx.cfg.DEFAULT_FREE_DAILY_REQUEST_LIMIT,
+      },
+      db_stats: this.ctx.adminDbSnapshot,
+      auth: {
+        mode: this.ctx.authMode,
+        env_bearer_enabled: this.ctx.envAuthEnabled && this.ctx.bearerTokens.length > 0,
+        env_bearer_token_count: this.ctx.bearerTokens.length,
+        env_bearer_tokens: this.ctx.bearerTokenIds.map((id) => ({
+          id,
+          last_used_iso: this.ctx.bearerTokenLastUsedMsById.has(id) ? new Date(this.ctx.bearerTokenLastUsedMsById.get(id)!).toISOString() : null,
+        })),
+      },
+    };
+  }
+
+  @Get("login")
+  async loginPage(@Res() reply: FastifyReply) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
+    reply
+      .code(200)
+      .type("text/html")
       .send(
         layoutHtml({
           title: "Admin Login",
@@ -227,111 +275,135 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
           `,
         }),
       );
-  });
+  }
 
-  app.post("/admin/login", async (req: Request, res: Response) => {
+  @Post("login")
+  async login(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
     const ajax = isAjax(req);
-    if (!deps.redis) {
-      if (ajax) return res.status(500).json({ ok: false, error: "Redis disabled" });
-      res.status(500).send("Redis disabled.");
+    if (!this.ctx.redis) {
+      const format = ajax ? "json" : "text";
+      sendApiError(req, reply, { format, httpStatus: 500, code: "REDIS_DISABLED", i18n: { zh: "Redis 未启用。", en: "Redis disabled." } });
       return;
     }
 
     // Admin 登录必须验证码：一次性校验通过即删除。
     if (
-      !(await requireCaptcha(req, res, {
-        redis: deps.redis,
+      !(await requireCaptcha(req, reply, {
+        redis: this.ctx.redis as any,
         scene: "admin_login",
-        value: req.body?.captcha,
+        value: (req as any).body?.captcha,
         ignoreCase: cfg.captchaIgnoreCase,
         format: ajax ? "json" : "text",
+        cookieSecure: cfg.cookieSecure,
       }))
     )
       return;
 
-    const username = String(req.body?.username ?? "");
-    const password = String(req.body?.password ?? "");
+    const username = String((req as any).body?.username ?? "");
+    const password = String((req as any).body?.password ?? "");
 
     if (username !== cfg.username || password !== cfg.password) {
-      if (ajax) return res.status(401).json({ ok: false, error: "Invalid credentials" });
-      res.status(401).send("Invalid credentials.");
+      const format = ajax ? "json" : "text";
+      sendApiError(req, reply, {
+        format,
+        httpStatus: 401,
+        code: "INVALID_CREDENTIALS",
+        i18n: { zh: "用户名或密码错误。", en: "Invalid credentials." },
+      });
       return;
     }
 
     const exp = Date.now() + cfg.sessionTtlSeconds * 1000;
     const session = signCookie(cfg.cookieSecret, { u: cfg.username, exp } satisfies SessionPayload);
-    setCookie(res, "admin_session", session, {
+    setCookie(reply, "admin_session", session, {
       maxAgeSeconds: cfg.sessionTtlSeconds,
       httpOnly: true,
       secure: cfg.cookieSecure,
       sameSite: "Lax",
       path: "/admin",
     });
-    if (ajax) return res.status(200).json({ ok: true, redirect: "/admin" });
-    res.redirect(302, "/admin");
-  });
+    if (ajax) return reply.code(200).send({ ok: true, redirect: "/admin" });
+    reply.redirect("/admin", 302);
+  }
 
-  app.post("/admin/logout", (_req: Request, res: Response) => {
+  @Post("logout")
+  async logout(@Res() reply: FastifyReply) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
     // 修复：登录时 cookie Path=/admin，登出也必须按相同 path 清理；并兼容历史 path=/
-    clearCookie(res, "admin_session", "/admin");
-    clearCookie(res, "admin_session", "/");
-    res.redirect(302, "/admin/login");
-  });
+    clearCookie(reply, "admin_session", "/admin");
+    clearCookie(reply, "admin_session", "/");
+    reply.redirect("/admin/login", 302);
+  }
 
   // 管理员：账号禁用（最小可用）。禁用后：无法登录 Dashboard，且 API Key 会被判定为 Unauthorized。
-  app.post("/admin/accounts/:id/disable", async (req: Request, res: Response) => {
-    const s = requireSession(req, res, cfg);
+  @Post("accounts/:id/disable")
+  async disableAccount(@Req() req: FastifyRequest, @Res() reply: FastifyReply, @Param("id") idParam: string) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
+    const s = requireSession(req, reply, cfg);
     if (!s) return;
-    if (!deps.db) return res.status(500).send("DB disabled");
-    const id = String(req.params.id ?? "");
-    if (!id) return res.status(400).send("Invalid id");
+    if (!this.ctx.db) return reply.code(500).send("DB disabled");
+    const id = String(idParam ?? "");
+    if (!id) return reply.code(400).send("Invalid id");
 
-    await deps.db.query("UPDATE accounts SET disabled_at=now() WHERE id=$1 AND disabled_at IS NULL", [id]);
+    await this.ctx.db.query("UPDATE accounts SET disabled_at=now() WHERE id=$1 AND disabled_at IS NULL", [id]);
     // 立即生效：设置 Redis 标记，避免 5 分钟的 API Key 缓存窗口。
-    if (deps.redis) await deps.redis.set(`acctdis:${id}`, "1");
-    res.redirect(302, "/admin");
-  });
+    if (this.ctx.redis) await (this.ctx.redis as any).set(`acctdis:${id}`, "1");
+    reply.redirect("/admin", 302);
+  }
 
   // 管理员：账号启用（最小可用）
-  app.post("/admin/accounts/:id/enable", async (req: Request, res: Response) => {
-    const s = requireSession(req, res, cfg);
+  @Post("accounts/:id/enable")
+  async enableAccount(@Req() req: FastifyRequest, @Res() reply: FastifyReply, @Param("id") idParam: string) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
+    const s = requireSession(req, reply, cfg);
     if (!s) return;
-    if (!deps.db) return res.status(500).send("DB disabled");
-    const id = String(req.params.id ?? "");
-    if (!id) return res.status(400).send("Invalid id");
+    if (!this.ctx.db) return reply.code(500).send("DB disabled");
+    const id = String(idParam ?? "");
+    if (!id) return reply.code(400).send("Invalid id");
 
-    await deps.db.query("UPDATE accounts SET disabled_at=NULL WHERE id=$1", [id]);
-    if (deps.redis) await deps.redis.del(`acctdis:${id}`);
-    res.redirect(302, "/admin");
-  });
+    await this.ctx.db.query("UPDATE accounts SET disabled_at=NULL WHERE id=$1", [id]);
+    if (this.ctx.redis) await (this.ctx.redis as any).del(`acctdis:${id}`);
+    reply.redirect("/admin", 302);
+  }
 
   // 管理员：吊销 API Key（最小可用）
-  app.post("/admin/api-keys/:id/revoke", async (req: Request, res: Response) => {
-    const s = requireSession(req, res, cfg);
+  @Post("api-keys/:id/revoke")
+  async revokeApiKey(@Req() req: FastifyRequest, @Res() reply: FastifyReply, @Param("id") idParam: string) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
+    const s = requireSession(req, reply, cfg);
     if (!s) return;
-    if (!deps.db) return res.status(500).send("DB disabled");
-    const id = String(req.params.id ?? "");
-    if (!id) return res.status(400).send("Invalid id");
+    if (!this.ctx.db) return reply.code(500).send("DB disabled");
+    const id = String(idParam ?? "");
+    if (!id) return reply.code(400).send("Invalid id");
 
-    const u = await deps.db.query<{ key_hash: string }>(
+    const u = await this.ctx.db.query<{ key_hash: string }>(
       "UPDATE api_keys SET revoked_at=now() WHERE id=$1 AND revoked_at IS NULL RETURNING key_hash",
       [id],
     );
-    if (u.rows.length === 0) return res.status(404).send("Not found");
+    if (u.rows.length === 0) return reply.code(404).send("Not found");
 
     // 立即失效：清除 keyHash 缓存 + 写入撤销标记（覆盖 requireApiKey 的 5 分钟缓存）
-    if (deps.redis) {
-      await deps.redis.del(`ak:${u.rows[0]!.key_hash}`);
-      await deps.redis.set(`akrev:${id}`, "1", { EX: 600 });
+    if (this.ctx.redis) {
+      await (this.ctx.redis as any).del(`ak:${u.rows[0]!.key_hash}`);
+      await (this.ctx.redis as any).set(`akrev:${id}`, "1", { EX: 600 });
     }
-    res.redirect(302, "/admin");
-  });
+    reply.redirect("/admin", 302);
+  }
 
-  app.get("/admin", async (req: Request, res: Response) => {
-    const s = requireSession(req, res, cfg);
+  @Get()
+  async admin(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
+    const s = requireSession(req, reply, cfg);
     if (!s) return;
 
-    const stats = deps.getStats();
+    const stats = this.getStats();
     const uptimeSeconds = Number((stats as any)?.uptime_s ?? 0);
     const transportsCount = Number((stats as any)?.transports ?? 0);
     const redisEnabled = Boolean((stats as any)?.redis);
@@ -340,7 +412,7 @@ export function registerAdminRoutes(app: any, cfg: AdminConfig, deps: AdminDeps)
     const rateLimit = Number(limits?.rate_limit_per_ip_per_minute ?? 0);
     const sseMax = Number(limits?.sse_max_conns_per_ip ?? 0);
 
-    const db = deps.db;
+    const db = this.ctx.db;
 
     // 账号/Key 列表（最小可用：只做展示与禁用/吊销）
     let accounts: Array<{ id: string; email: string; created_at: string | Date; disabled_at: string | null; active_keys: number }> = [];
@@ -392,7 +464,7 @@ LIMIT 50
       keys = k.rows;
     }
 
-    res.status(200).type("html").send(
+    reply.code(200).type("text/html").send(
       layoutHtml({
         title: "Admin",
         body: `
@@ -507,7 +579,7 @@ LIMIT 50
                           : `<span class="badge badge-ok"><span class="dot dot-ok" aria-hidden="true"></span>active</span>`;
                         const action = a.disabled_at
                           ? `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/enable" style="margin:0"><button class="btn btn-sm" type="submit">Enable</button></form>`
-                          : `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/disable" style="margin:0"><button class="btn btn-sm btn-danger" type="submit" onclick="return confirm('确定禁用该账号？')">Disable</button></form>`;
+                          : `<form method="post" action="/admin/accounts/${escapeHtml(a.id)}/disable" style="margin:0"><button class="btn btn-sm btn-danger" type="submit" data-confirm="disable-account">Disable</button></form>`;
                         return `<tr>
                           <td class="mono">${escapeHtml(a.email)}</td>
                           <td>${renderWhenUtc(a.created_at)}</td>
@@ -554,7 +626,7 @@ LIMIT 50
                           : `<span class="badge badge-ok"><span class="dot dot-ok" aria-hidden="true"></span>active</span>`;
                         const action = k.revoked_at
                           ? ""
-                          : `<form method="post" action="/admin/api-keys/${escapeHtml(k.id)}/revoke" style="margin:0"><button class="btn btn-sm btn-danger" type="submit" onclick="return confirm('确定吊销该 Key？吊销后将立即失效。')">Revoke</button></form>`;
+                          : `<form method="post" action="/admin/api-keys/${escapeHtml(k.id)}/revoke" style="margin:0"><button class="btn btn-sm btn-danger" type="submit" data-confirm="revoke-key">Revoke</button></form>`;
                         return `<tr>
                           <td class="mono">${escapeHtml(k.prefix)}</td>
                           <td>${escapeHtml(k.name)}</td>
@@ -591,6 +663,59 @@ LIMIT 50
         `,
         scripts: `
           (function(){
+${modalInlineScripts()}
+            // 拦截危险操作：禁用账号 / 吊销 Key（自定义确认弹窗）
+            document.addEventListener('click', async (e) => {
+              const btn = e.target && e.target.closest ? e.target.closest('button[data-confirm]') : null;
+              if(!btn) return;
+              const kind = btn.getAttribute('data-confirm') || '';
+              const form = btn.closest('form');
+              if(!form) return;
+              e.preventDefault();
+
+              const tr = btn.closest('tr');
+              let detail = '';
+              if(tr){
+                const tds = tr.querySelectorAll('td');
+                if(kind === 'disable-account'){
+                  const email = tds && tds[0] ? (tds[0].textContent || '') : '';
+                  detail = email ? ('账号：' + email) : '';
+                }else if(kind === 'revoke-key'){
+                  const prefix = tds && tds[0] ? (tds[0].textContent || '') : '';
+                  const name = tds && tds[1] ? (tds[1].textContent || '') : '';
+                  const account = tds && tds[2] ? (tds[2].textContent || '') : '';
+                  const lines = [];
+                  if(prefix) lines.push('前缀：' + prefix);
+                  if(name) lines.push('名称：' + name);
+                  if(account) lines.push('账号：' + account);
+                  detail = lines.join('\\n');
+                }
+              }
+
+              let title = '确认操作';
+              let message = '确定继续吗？';
+              let okText = '确认';
+              if(kind === 'disable-account'){
+                title = '禁用账号';
+                message = '禁用后该账号将无法登录与调用。';
+                okText = '确认禁用';
+              }else if(kind === 'revoke-key'){
+                title = '吊销 API Key';
+                message = '吊销后将立即失效，且不可恢复。';
+                okText = '确认吊销';
+              }
+
+              const ok = await confirmModal({
+                title,
+                message,
+                detail,
+                okText,
+                cancelText: '取消',
+                danger: true,
+              });
+              if(ok) form.submit();
+            });
+
             const badge = document.getElementById('chartsBadge');
             const status = document.getElementById('chartsStatus');
             function setStatus(msg){
@@ -684,13 +809,16 @@ LIMIT 50
         `,
       }),
     );
-  });
+  }
 
-  app.get("/admin/api/stats", (req: Request, res: Response) => {
-    const s = requireSession(req, res, cfg);
+  @Get("api/stats")
+  async apiStats(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
+    const cfg = this.adminCfg(reply);
+    if (!cfg) return;
+    const s = requireSession(req, reply, cfg);
     if (!s) return;
-    res.status(200).json(deps.getStats());
-  });
+    reply.code(200).send(this.getStats());
+  }
 }
 
 function formatDuration(uptimeSeconds: number) {

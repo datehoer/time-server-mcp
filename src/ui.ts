@@ -287,6 +287,218 @@ export function baseStyles() {
     .toast-title{font-weight:750;font-size:13px}
     .toast-msg{margin-top:4px;color:hsl(var(--muted-foreground));font-size:13px}
     .toast-actions{margin-top:10px;display:flex;justify-content:flex-end;gap:10px}
+
+    /* Modal：替代浏览器 confirm/prompt（统一风格、承载更明确的提示信息） */
+    .modal-backdrop{
+      position:fixed;inset:0;z-index:10000;
+      display:flex;align-items:center;justify-content:center;
+      padding:24px 16px;
+      background:hsl(222 47% 11% / 0.45);
+      backdrop-filter:saturate(1.2) blur(2px);
+    }
+    .modal{
+      width:100%;max-width:520px;
+      border-radius:calc(var(--radius) + 8px);
+      border:1px solid hsl(var(--border));
+      background:hsl(var(--card));
+      color:hsl(var(--foreground));
+      box-shadow:var(--shadow);
+      padding:14px 14px 12px;
+    }
+    .modal-title{font-weight:800;font-size:14px}
+    .modal-msg{
+      margin-top:6px;color:hsl(var(--muted-foreground));
+      font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere
+    }
+    .modal-detail{
+      margin-top:10px;
+      padding:10px 12px;
+      border-radius:calc(var(--radius) + 4px);
+      border:1px solid hsl(var(--border));
+      background:hsl(var(--muted) / 0.35);
+      color:hsl(var(--foreground));
+      font-size:12px;
+      white-space:pre-wrap;
+      overflow-wrap:anywhere;
+    }
+    .modal-input{margin-top:10px}
+    .modal-actions{margin-top:12px;display:flex;justify-content:flex-end;gap:10px}
+  `;
+}
+
+// 供页面内联脚本复用：自定义弹窗（替代 confirm/prompt）
+export function modalInlineScripts() {
+  return `
+            // 自定义 Modal：替代浏览器 confirm/prompt（统一风格 + 简洁但明确）
+            function __mcpOpenModal(opts){
+              opts = opts || {};
+              var backdrop = document.createElement('div');
+              backdrop.className = 'modal-backdrop';
+              backdrop.innerHTML =
+                '<div class="modal" role="dialog" aria-modal="true">' +
+                  '<div class="modal-title"></div>' +
+                  '<div class="modal-msg"></div>' +
+                  '<div class="modal-detail" style="display:none"></div>' +
+                  '<div class="modal-actions"></div>' +
+                '</div>';
+              document.body.appendChild(backdrop);
+
+              var card = backdrop.querySelector('.modal');
+              var titleEl = backdrop.querySelector('.modal-title');
+              var msgEl = backdrop.querySelector('.modal-msg');
+              var detailEl = backdrop.querySelector('.modal-detail');
+              var actionsEl = backdrop.querySelector('.modal-actions');
+
+              if(titleEl) titleEl.textContent = String(opts.title || '');
+              if(msgEl) msgEl.textContent = String(opts.message || '');
+              var detail = String(opts.detail || '');
+              if(detailEl){
+                if(detail){
+                  detailEl.textContent = detail;
+                  detailEl.style.display = '';
+                }else{
+                  detailEl.style.display = 'none';
+                }
+              }
+
+              var prevFocus = document.activeElement;
+              function cleanup(result){
+                try{ backdrop.remove(); }catch(_e){}
+                try{ if(prevFocus && prevFocus.focus) prevFocus.focus(); }catch(_e2){}
+                return result;
+              }
+
+              function onKeydown(e){
+                if(e && e.key === 'Escape'){
+                  e.preventDefault();
+                  if(typeof opts.onCancel === 'function') opts.onCancel();
+                }
+              }
+              document.addEventListener('keydown', onKeydown);
+
+              backdrop.addEventListener('click', function(e){
+                if(e && e.target === backdrop && typeof opts.onCancel === 'function') opts.onCancel();
+              });
+              if(card){
+                card.addEventListener('click', function(e){ try{ e.stopPropagation(); }catch(_e){} });
+              }
+
+              return {
+                backdrop: backdrop,
+                detailEl: detailEl,
+                actionsEl: actionsEl,
+                cleanup: function(result){
+                  document.removeEventListener('keydown', onKeydown);
+                  return cleanup(result);
+                },
+              };
+            }
+
+            function confirmModal(opts){
+              return new Promise(function(resolve){
+                var done = false;
+                var m = __mcpOpenModal({
+                  title: opts && opts.title,
+                  message: opts && opts.message,
+                  detail: opts && opts.detail,
+                  onCancel: function(){ finish(false); },
+                });
+
+                function finish(v){
+                  if(done) return;
+                  done = true;
+                  resolve(m.cleanup(!!v));
+                }
+
+                var cancelText = (opts && opts.cancelText) ? String(opts.cancelText) : '取消';
+                var okText = (opts && opts.okText) ? String(opts.okText) : '确认';
+                var danger = !!(opts && opts.danger);
+
+                var btnCancel = document.createElement('button');
+                btnCancel.className = 'btn';
+                btnCancel.type = 'button';
+                btnCancel.textContent = cancelText;
+                btnCancel.addEventListener('click', function(){ finish(false); });
+
+                var btnOk = document.createElement('button');
+                btnOk.className = danger ? 'btn btn-danger' : 'btn btn-primary';
+                btnOk.type = 'button';
+                btnOk.textContent = okText;
+                btnOk.addEventListener('click', function(){ finish(true); });
+
+                if(m.actionsEl){
+                  m.actionsEl.appendChild(btnCancel);
+                  m.actionsEl.appendChild(btnOk);
+                }
+
+                // 危险操作默认聚焦“取消”，避免误触；普通确认聚焦“确认”
+                setTimeout(function(){
+                  try{ (danger ? btnCancel : btnOk).focus(); }catch(_e){}
+                }, 0);
+              });
+            }
+
+            function promptModal(opts){
+              return new Promise(function(resolve){
+                var done = false;
+                var m = __mcpOpenModal({
+                  title: opts && opts.title,
+                  message: opts && opts.message,
+                  detail: opts && opts.detail,
+                  onCancel: function(){ finish(null); },
+                });
+
+                function finish(v){
+                  if(done) return;
+                  done = true;
+                  resolve(m.cleanup(v));
+                }
+
+                var inputWrap = document.createElement('div');
+                inputWrap.className = 'modal-input';
+                var input = document.createElement('input');
+                input.className = 'input';
+                input.type = 'text';
+                input.placeholder = String((opts && opts.placeholder) || '');
+                input.value = String((opts && opts.defaultValue) || '');
+                inputWrap.appendChild(input);
+
+                try{
+                  if(m.detailEl && m.detailEl.parentNode) m.detailEl.parentNode.insertBefore(inputWrap, m.detailEl);
+                }catch(_e){
+                  try{ m.backdrop.appendChild(inputWrap); }catch(_e2){}
+                }
+
+                var cancelText = (opts && opts.cancelText) ? String(opts.cancelText) : '取消';
+                var okText = (opts && opts.okText) ? String(opts.okText) : '确定';
+
+                var btnCancel = document.createElement('button');
+                btnCancel.className = 'btn';
+                btnCancel.type = 'button';
+                btnCancel.textContent = cancelText;
+                btnCancel.addEventListener('click', function(){ finish(null); });
+
+                var btnOk = document.createElement('button');
+                btnOk.className = 'btn btn-primary';
+                btnOk.type = 'button';
+                btnOk.textContent = okText;
+                btnOk.addEventListener('click', function(){ finish(input.value); });
+
+                if(m.actionsEl){
+                  m.actionsEl.appendChild(btnCancel);
+                  m.actionsEl.appendChild(btnOk);
+                }
+
+                input.addEventListener('keydown', function(e){
+                  if(e && e.key === 'Enter'){
+                    e.preventDefault();
+                    finish(input.value);
+                  }
+                });
+
+                setTimeout(function(){ try{ input.focus(); input.select(); }catch(_e){} }, 0);
+              });
+            }
   `;
 }
 
